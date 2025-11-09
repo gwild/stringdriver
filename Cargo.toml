@@ -50,31 +50,16 @@ gpiocdev = { version = "0.7", optional = true }
 default = []
 gpiod = ["gpiocdev"]
 
+# GUI Applications
 [[bin]]
-name = "pitch_detector"
-path = "src/bin/pitch_detector.rs"
-
-[[bin]]
-name = "ard_rust"
-path = "src/bin/ard_rust.rs"
-
-[[bin]]
-name = "gpio_test"
-path = "src/bin/gpio_test.rs"
+name = "stepper_gui"
+path = "src/gui/stepper_gui.rs"
 
 [[bin]]
 name = "operations_gui"
-path = "src/bin/operations_gui.rs"
-
-[[bin]]
-name = "gstreamer_test"
-path = "src/bin/gstreamer_test.rs"
+path = "src/gui/operations_gui.rs"
 
 [[bin]]
 name = "launcher"
-path = "src/bin/launcher.rs"
-
-[[bin]]
-name = "stepper_gui"
-path = "src/bin/stepper_gui.rs"
+path = "src/gui/launcher.rs"
 

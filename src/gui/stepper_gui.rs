@@ -8,6 +8,9 @@ use std::io::{Read, Write};
 use std::process::Command;
 use gethostname::gethostname;
 use egui::Color32;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::{Arc, Mutex};
+use std::path::Path;
 
 #[path = "../config_loader.rs"]
 mod config_loader;
@@ -53,6 +56,7 @@ struct StepperGUI {
     z_speed: i32,
     z_min: i32,
     z_max: i32,
+    socket_path: String,
 }
 
 impl Default for StepperGUI {
@@ -87,6 +91,7 @@ impl Default for StepperGUI {
             z_speed: 100,
             z_min: -100,
             z_max: 100,
+            socket_path: String::new(),
         }
     }
 }
@@ -126,7 +131,112 @@ impl StepperGUI {
             }
         }
         if debug { s.log("Debug logging enabled"); }
+        // Generate socket path from port path
+        let port_id = s.port_path.replace("/", "_").replace("\\", "_");
+        s.socket_path = format!("/tmp/stepper_gui_{}.sock", port_id);
         s
+    }
+    
+    /// Handle a text command from Unix socket
+    fn handle_command(&mut self, cmd: &str) {
+        let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
+        if parts.is_empty() {
+            return;
+        }
+        
+        match parts[0] {
+            "rel_move" => {
+                if parts.len() == 3 {
+                    if let (Ok(stepper), Ok(delta)) = (parts[1].parse::<usize>(), parts[2].parse::<i32>()) {
+                        self.log(&format!("IPC: rel_move {} {}", stepper, delta));
+                        self.move_stepper(stepper, delta);
+                    }
+                }
+            }
+            "abs_move" => {
+                if parts.len() == 3 {
+                    if let (Ok(stepper), Ok(position)) = (parts[1].parse::<usize>(), parts[2].parse::<i32>()) {
+                        self.log(&format!("IPC: abs_move {} {}", stepper, position));
+                        self.set_position(stepper, position);
+                    }
+                }
+            }
+            "reset" => {
+                if parts.len() == 3 {
+                    if let (Ok(stepper), Ok(position)) = (parts[1].parse::<usize>(), parts[2].parse::<i32>()) {
+                        self.log(&format!("IPC: reset {} {}", stepper, position));
+                        self.set_position(stepper, position);
+                    }
+                }
+            }
+            _ => {
+                self.log(&format!("IPC: Unknown command: {}", cmd.trim()));
+            }
+        }
+    }
+    
+    /// Start Unix socket listener in background thread
+    fn start_socket_listener(app: Arc<Mutex<StepperGUI>>) {
+        let socket_path = {
+            let guard = app.lock().unwrap();
+            guard.socket_path.clone()
+        };
+        
+        // Remove old socket if it exists
+        if Path::new(&socket_path).exists() {
+            let _ = std::fs::remove_file(&socket_path);
+        }
+        
+        thread::spawn(move || {
+            let listener = match UnixListener::bind(&socket_path) {
+                Ok(l) => {
+                    eprintln!("Unix socket listener started at: {}", socket_path);
+                    l
+                }
+                Err(e) => {
+                    eprintln!("Failed to bind Unix socket at {}: {}", socket_path, e);
+                    return;
+                }
+            };
+            
+            // Set socket permissions (read/write for user and group)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(metadata) = std::fs::metadata(&socket_path) {
+                    let mut perms = metadata.permissions();
+                    perms.set_mode(0o660);
+                    let _ = std::fs::set_permissions(&socket_path, perms);
+                }
+            }
+            
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(mut stream) => {
+                        let app_clone = Arc::clone(&app);
+                        thread::spawn(move || {
+                            let mut buffer = [0u8; 1024];
+                            match stream.read(&mut buffer) {
+                                Ok(n) if n > 0 => {
+                                    if let Ok(cmd) = String::from_utf8(buffer[..n].to_vec()) {
+                                        if let Ok(mut guard) = app_clone.lock() {
+                                            guard.handle_command(&cmd);
+                                        }
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    eprintln!("Socket read error: {}", e);
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("Socket accept error: {}", e);
+                    }
+                }
+            }
+        });
     }
     fn kill_port_users(&mut self, port_path: &str) {
         // Find PIDs with the port open
@@ -913,76 +1023,6 @@ impl eframe::App for StepperGUI {
                                 });
                             });
                         });
-                        
-                            // Left stepper ("out" stepper)
-                            ui.vertical(|ui| {
-                                ui.label(format!("Stepper {} (out)", left_idx));
-                                
-                                // Horizontal layout: slider on left, number box with buttons on right (tight spacing)
-                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_justify(false), |ui| {
-                                    ui.set_width(80.0); // Constrain width to keep layout tight
-                                    
-                                    // Read-only vertical slider for visualization with colored background
-                                    let pos_display = self.positions[left_idx];
-                                    let pos_normalized = (pos_display + 100) as f32 / 200.0; // Normalize -100..100 to 0..1
-                                    
-                                    // Draw colored slider area (half size: 20x100 instead of 40x200)
-                                    let desired_size = egui::vec2(20.0, 100.0);
-                                    let response = ui.allocate_response(desired_size, egui::Sense::hover());
-                                    let rect = response.rect;
-                                    let painter = ui.painter();
-                                    // Draw background
-                                    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(40, 40, 40));
-                                    // Draw filled portion with channel color
-                                    let fill_height = rect.height() * pos_normalized;
-                                    let fill_rect = egui::Rect::from_min_size(
-                                        rect.min,
-                                        egui::vec2(rect.width(), fill_height)
-                                    );
-                                    painter.rect_filled(fill_rect, 0.0, color);
-                                    // Draw slider thumb
-                                    let thumb_y = rect.min.y + rect.height() * (1.0 - pos_normalized);
-                                    painter.circle_filled(egui::pos2(rect.center().x, thumb_y), 4.0, Color32::WHITE);
-                                    
-                                    // Vertical stack: + button, number box, - button
-                                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                                        ui.add_space(20.0);
-                                        
-                                        // Inc (+) button above number box
-                                        if ui.button("+").clicked() {
-                                            self.move_stepper(left_idx, 2);
-                                        }
-                                        
-                                        // Use DragValue for proper number input, but only commit on Enter
-                                        let current_pos = self.positions[left_idx];
-                                        let pending = self.pending_positions.entry(left_idx).or_insert(current_pos);
-                                        let response = ui.add(egui::DragValue::new(pending)
-                                            .clamp_range(-100..=100)
-                                            .speed(1.0));
-                                        
-                                        let has_focus = response.has_focus();
-                                        let lost_focus = response.lost_focus();
-                                        let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                        
-                                        if lost_focus && enter_pressed {
-                                            let pending_value = *pending;
-                                            drop(pending);
-                                            let clamped = pending_value.clamp(-100, 100);
-                                            self.set_position(left_idx, clamped);
-                                            self.pending_positions.insert(left_idx, clamped);
-                                        } else {
-                                            if !has_focus && *pending != current_pos {
-                                                *pending = current_pos;
-                                            }
-                                        }
-                                        
-                                        // Dec (-) button below number box
-                                        if ui.button("-").clicked() {
-                                            self.move_stepper(left_idx, -2);
-                                        }
-                                    });
-                                });
-                            });
                             
                             // Right stepper ("in" stepper)
                             ui.vertical(|ui| {
@@ -1227,6 +1267,26 @@ fn main() {
     if !app.connected {
         eprintln!("WARNING: Failed to connect to Arduino at {}", settings.port);
     }
+    
+    // Start Unix socket listener for IPC commands
+    // We need to share the app with the listener thread, so we wrap it in Arc<Mutex<>>
+    let app_arc = Arc::new(Mutex::new(app));
+    StepperGUI::start_socket_listener(Arc::clone(&app_arc));
+    
+    // Create a wrapper that implements App and locks/unlocks the inner app
+    struct AppWrapper {
+        app: Arc<Mutex<StepperGUI>>,
+    }
+    
+    impl eframe::App for AppWrapper {
+        fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+            if let Ok(mut guard) = self.app.lock() {
+                guard.update(ctx, frame);
+            }
+        }
+    }
+    
+    let wrapper = AppWrapper { app: app_arc };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1236,6 +1296,6 @@ fn main() {
     let _ = eframe::run_native(
         "String Driver Stepper Control",
         options,
-        Box::new(|_cc| Box::new(app))
+        Box::new(|_cc| Box::new(wrapper))
     );
 }

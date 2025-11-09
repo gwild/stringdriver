@@ -33,9 +33,7 @@ Ubuntu:
     X_STEP_INDEX: 0
     Z_FIRST_INDEX: 1
     X_MAX_POS: 2600 #dummy value
-    TUNER_FIRST_INDEX: 9 #simulated tuners
-    # TUNER_FIRST_INDEX: 0
-    # ARD_T_NUM_STEPPERS: 6
+    # No tuners on stringdriver-3 hardware - omit TUNER_FIRST_INDEX so no tuners are created
     ARD_T_PORT: null
     # Binary sizes for Pico (RP2040)
     # ARD_T_INT_BYTES: 4

@@ -21,11 +21,64 @@ use std::time::Duration;
 /// Using get_results::PartialsData type
 type PartialsSlot = Arc<Mutex<Option<get_results::PartialsData>>>;
 
+/// Arduino stepper operations implementation using simple Unix socket text commands
+/// Sends commands like "rel_move 2 2\n" to stepper_gui's Unix socket listener
+struct ArduinoStepperOps {
+    socket_path: String,
+}
+
+impl ArduinoStepperOps {
+    fn new(port_path: &str) -> Self {
+        // Generate socket path the same way as stepper_gui.rs
+        let port_id = port_path.replace("/", "_").replace("\\", "_");
+        let socket_path = format!("/tmp/stepper_gui_{}.sock", port_id);
+        Self { socket_path }
+    }
+    
+    /// Send a text command to stepper_gui via Unix socket
+    fn send_command(&self, cmd: &str) -> Result<()> {
+        use std::os::unix::net::UnixStream;
+        use std::io::Write;
+        
+        let mut stream = UnixStream::connect(&self.socket_path)
+            .map_err(|e| anyhow::anyhow!("Failed to connect to stepper_gui socket at {}: {}", self.socket_path, e))?;
+        
+        let cmd_with_newline = format!("{}\n", cmd);
+        stream.write_all(cmd_with_newline.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Failed to write command to socket: {}", e))?;
+        stream.flush()
+            .map_err(|e| anyhow::anyhow!("Failed to flush socket: {}", e))?;
+        
+        Ok(())
+    }
+}
+
+impl operations::StepperOperations for ArduinoStepperOps {
+    fn rel_move(&mut self, stepper: usize, delta: i32) -> Result<()> {
+        self.send_command(&format!("rel_move {} {}", stepper, delta))
+    }
+    
+    fn abs_move(&mut self, stepper: usize, position: i32) -> Result<()> {
+        self.send_command(&format!("abs_move {} {}", stepper, position))
+    }
+    
+    fn reset(&mut self, stepper: usize, position: i32) -> Result<()> {
+        self.send_command(&format!("reset {} {}", stepper, position))
+    }
+    
+    fn disable(&mut self, _stepper: usize) -> Result<()> {
+        // Disable is handled by setting enable state in operations, not a direct Arduino command
+        Ok(())
+    }
+}
+
 /// Operations GUI state
 struct OperationsGUI {
     operations: operations::Operations,
     message: String,
     partials_slot: PartialsSlot,
+    selected_operation: String,
+    arduino_ops: Option<ArduinoStepperOps>,
 }
 
 impl OperationsGUI {
@@ -34,13 +87,17 @@ impl OperationsGUI {
         // Create a partials slot for shared memory updates
         let partials_slot: PartialsSlot = Arc::new(Mutex::new(None));
         
-        // Get string_num from config to know how many channels to read
+        // Get config to know how many channels to read and Arduino port
         let hostname = gethostname::gethostname().to_string_lossy().to_string();
         let ard_settings = config_loader::load_arduino_settings(&hostname)?;
         let string_num = ard_settings.string_num;
+        let port_path = ard_settings.port.clone();
         
         // Create operations with the partials slot
         let operations = operations::Operations::new_with_partials_slot(Some(Arc::clone(&partials_slot)))?;
+        
+        // Create Arduino stepper operations client (connects via IPC to stepper_gui's connection)
+        let arduino_ops = ArduinoStepperOps::new(&port_path);
         
         // Spawn a thread to periodically update the partials slot from shared memory
         let partials_slot_thread = Arc::clone(&partials_slot);
@@ -65,6 +122,8 @@ impl OperationsGUI {
             operations,
             message: String::new(),
             partials_slot,
+            selected_operation: "None".to_string(),
+            arduino_ops: Some(arduino_ops),
         })
     }
     
@@ -74,6 +133,80 @@ impl OperationsGUI {
             self.message.push('\n');
         }
         self.message.push_str(msg);
+    }
+    
+    /// Execute the selected operation
+    fn execute_operation(&mut self) {
+        // Check if arduino_ops is available first
+        if self.arduino_ops.is_none() {
+            self.append_message("Arduino connection client not available");
+            return;
+        }
+        
+        // Get current positions (stub - will need to read from Arduino)
+        let z_indices = self.operations.get_z_stepper_indices();
+        let mut positions = vec![0i32; z_indices.iter().max().copied().unwrap_or(0) + 1];
+        let mut max_positions = std::collections::HashMap::new();
+        for &idx in &z_indices {
+            max_positions.insert(idx, 100); // Default max position
+        }
+        
+        match self.selected_operation.as_str() {
+            "z_calibrate" => {
+                self.append_message("Executing Z Calibrate...");
+                // Use scoped block to limit borrow lifetime
+                let result = {
+                    let stepper_ops = self.arduino_ops.as_mut().unwrap();
+                    self.operations.z_calibrate(
+                        stepper_ops,
+                        &mut positions,
+                        &max_positions,
+                        None,
+                    )
+                };
+                match result {
+                    Ok(msg) => {
+                        self.append_message(&msg);
+                    }
+                    Err(e) => {
+                        self.append_message(&format!("Error: {}", e));
+                    }
+                }
+            }
+            "z_adjust" => {
+                self.append_message("Executing Z Adjust...");
+                // Default thresholds (will need to come from config or GUI)
+                let min_thresholds = vec![20.0; self.operations.string_num];
+                let max_thresholds = vec![100.0; self.operations.string_num];
+                let min_voices = vec![0; self.operations.string_num];
+                let max_voices = vec![12; self.operations.string_num];
+                
+                // Use scoped block to limit borrow lifetime
+                let result = {
+                    let stepper_ops = self.arduino_ops.as_mut().unwrap();
+                    self.operations.z_adjust(
+                        stepper_ops,
+                        &mut positions,
+                        &min_thresholds,
+                        &max_thresholds,
+                        &min_voices,
+                        &max_voices,
+                        None,
+                    )
+                };
+                match result {
+                    Ok(msg) => {
+                        self.append_message(&msg);
+                    }
+                    Err(e) => {
+                        self.append_message(&format!("Error: {}", e));
+                    }
+                }
+            }
+            _ => {
+                self.append_message("No operation selected");
+            }
+        }
     }
 }
 
@@ -213,11 +346,35 @@ impl eframe::App for OperationsGUI {
             
             ui.separator();
             
+            // Operations dropdown menu
+            ui.heading("Operations");
+            ui.horizontal(|ui| {
+                ui.label("Select Operation:");
+                egui::ComboBox::from_id_source("operation_select")
+                    .selected_text(&self.selected_operation)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.selected_operation, "None".to_string(), "None");
+                        ui.selectable_value(&mut self.selected_operation, "z_calibrate".to_string(), "Z Calibrate");
+                        ui.selectable_value(&mut self.selected_operation, "z_adjust".to_string(), "Z Adjust");
+                    });
+                
+                if ui.button("Execute").clicked() && self.selected_operation != "None" {
+                    self.execute_operation();
+                }
+            });
+            
+            ui.separator();
+            
             // Display messages
             if !self.message.is_empty() {
                 ui.separator();
                 ui.label("Messages:");
-                ui.text_edit_multiline(&mut self.message);
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        ui.text_edit_multiline(&mut self.message);
+                    });
             }
         });
     }

@@ -1,10 +1,10 @@
 /// Standalone GPIO test binary - matches GPIO_SD.py test loop (lines 433-457)
 /// 
-/// Run with: cargo run --bin gpio_test --features gpiod
+/// Run with: cargo run --example gpio_test --features gpiod
 
-#[path = "../config_loader.rs"]
+#[path = "../src/config_loader.rs"]
 mod config_loader;
-#[path = "../gpio.rs"]
+#[path = "../src/gpio.rs"]
 mod gpio;
 
 use anyhow::Result;

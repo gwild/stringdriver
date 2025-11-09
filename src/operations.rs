@@ -622,5 +622,237 @@ impl Operations {
             exit_flag,
         )
     }
+    
+    /// Z-calibrate: Move Z steppers down until they touch sensors, then reset to 0.
+    /// 
+    /// This function calibrates Z-steppers by moving them down until they contact
+    /// the touch sensors, then resets their position to 0.
+    /// 
+    /// Args:
+    /// - stepper_ops: Trait object for performing stepper operations
+    /// - positions: Current stepper positions (will be updated)
+    /// - max_positions: Maximum positions for each stepper (index -> max_pos)
+    /// - exit_flag: Optional exit flag to check for early return
+    /// 
+    /// Returns message string describing results
+    pub fn z_calibrate<T: StepperOperations>(
+        &self,
+        stepper_ops: &mut T,
+        positions: &mut [i32],
+        max_positions: &HashMap<usize, i32>,
+        exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<String> {
+        let gpio = self.gpio.as_ref().ok_or_else(|| anyhow!("GPIO not initialized"))?;
+        if !gpio.exist {
+            return Ok("Z-Calibration requires GPIO".to_string());
+        }
+        
+        let z_indices = self.get_z_stepper_indices();
+        let enabled_states = self.get_all_stepper_enabled();
+        let z_down_step = self.get_z_down_step();
+        let mut messages = Vec::new();
+        
+        messages.push("Starting Z calibration...".to_string());
+        
+        // Calibrate each enabled Z-stepper
+        for &stepper_idx in &z_indices {
+            // Check exit flag
+            if let Some(exit) = exit_flag {
+                if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                    messages.push("Calibration cancelled".to_string());
+                    return Ok(messages.join("\n"));
+                }
+            }
+            
+            let enabled = enabled_states.get(&stepper_idx).copied().unwrap_or(false);
+            if !enabled {
+                messages.push(format!("Skipping disabled stepper {}", stepper_idx));
+                continue;
+            }
+            
+            let gpio_index = stepper_idx.saturating_sub(self.z_first_index);
+            let max_pos = max_positions.get(&stepper_idx).copied().unwrap_or(100);
+            
+            // Move to max position first to ensure clear of sensor
+            stepper_ops.abs_move(stepper_idx, max_pos)?;
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            
+            // Move down until sensor is touched
+            let mut current_pos = max_pos;
+            let mut touched = false;
+            let mut steps_moved = 0;
+            
+            while !touched {
+                // Check exit flag
+                if let Some(exit) = exit_flag {
+                    if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                        messages.push(format!("Calibration cancelled for stepper {}", stepper_idx));
+                        break;
+                    }
+                }
+                
+                // Check if we've hit minimum position
+                if current_pos <= 0 {
+                    messages.push(format!("Stepper {} bottomed out during calibration", stepper_idx));
+                    break;
+                }
+                
+                // Check sensor
+                match gpio.press_check(Some(gpio_index)) {
+                    Ok(states) => {
+                        if let Some(&is_touching) = states.get(0) {
+                            if is_touching {
+                                touched = true;
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        messages.push(format!("GPIO error for stepper {}: {}", stepper_idx, e));
+                        break;
+                    }
+                }
+                
+                // Move down
+                stepper_ops.rel_move(stepper_idx, z_down_step)?;
+                current_pos += z_down_step;
+                steps_moved += z_down_step.abs();
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            
+            if touched {
+                // Reset to 0
+                stepper_ops.reset(stepper_idx, 0)?;
+                if let Some(pos) = positions.get_mut(stepper_idx) {
+                    *pos = 0;
+                }
+                messages.push(format!("Stepper {} calibrated (touched sensor, reset to 0)", stepper_idx));
+            } else {
+                messages.push(format!("Stepper {} calibration incomplete", stepper_idx));
+            }
+        }
+        
+        messages.push("Z calibration complete".to_string());
+        Ok(messages.join("\n"))
+    }
+    
+    /// Z-adjust: Adjust Z steppers based on audio analysis (amplitude and voice count).
+    /// 
+    /// This function adjusts Z-steppers based on audio analysis to keep strings
+    /// in the correct position. It checks amplitude sums and voice counts against
+    /// thresholds and moves steppers accordingly.
+    /// 
+    /// Args:
+    /// - stepper_ops: Trait object for performing stepper operations
+    /// - positions: Current stepper positions (will be updated)
+    /// - min_thresholds: Minimum amplitude thresholds per channel
+    /// - max_thresholds: Maximum amplitude thresholds per channel
+    /// - min_voices: Minimum voice counts per channel
+    /// - max_voices: Maximum voice counts per channel
+    /// - exit_flag: Optional exit flag to check for early return
+    /// 
+    /// Returns message string describing results
+    pub fn z_adjust<T: StepperOperations>(
+        &self,
+        stepper_ops: &mut T,
+        positions: &mut [i32],
+        min_thresholds: &[f32],
+        max_thresholds: &[f32],
+        min_voices: &[usize],
+        max_voices: &[usize],
+        exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<String> {
+        let enabled_states = self.get_all_stepper_enabled();
+        let z_up_step = self.get_z_up_step();
+        let z_down_step = self.get_z_down_step();
+        let amp_sums = self.get_amp_sum();
+        let voice_counts = self.get_voice_count();
+        let mut messages = Vec::new();
+        
+        messages.push("Starting Z adjustment...".to_string());
+        
+        // Adjust each string (pair of Z steppers)
+        for string_idx in 0..self.string_num {
+            // Check exit flag
+            if let Some(exit) = exit_flag {
+                if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                    messages.push("Adjustment cancelled".to_string());
+                    return Ok(messages.join("\n"));
+                }
+            }
+            
+            if string_idx >= amp_sums.len() || string_idx >= voice_counts.len() {
+                continue;
+            }
+            
+            let amp_sum = amp_sums[string_idx];
+            let voice_count = voice_counts[string_idx];
+            
+            let min_thresh = min_thresholds.get(string_idx).copied().unwrap_or(20.0);
+            let max_thresh = max_thresholds.get(string_idx).copied().unwrap_or(100.0);
+            let min_voice = min_voices.get(string_idx).copied().unwrap_or(0);
+            let max_voice = max_voices.get(string_idx).copied().unwrap_or(12);
+            
+            // Determine which stepper to move (z_in or z_out)
+            let z_in_idx = self.z_first_index + (string_idx * 2);
+            let z_out_idx = self.z_first_index + (string_idx * 2) + 1;
+            
+            let z_in_enabled = enabled_states.get(&z_in_idx).copied().unwrap_or(false);
+            let z_out_enabled = enabled_states.get(&z_out_idx).copied().unwrap_or(false);
+            
+            if !z_in_enabled && !z_out_enabled {
+                messages.push(format!("String {}: both steppers disabled, skipping", string_idx));
+                continue;
+            }
+            
+            // Determine which stepper to move (prefer the one closer to 0, or enabled one)
+            let z_in_pos = positions.get(z_in_idx).copied().unwrap_or(0);
+            let z_out_pos = positions.get(z_out_idx).copied().unwrap_or(0);
+            
+            let stepper_to_move = if !z_in_enabled {
+                z_out_idx
+            } else if !z_out_enabled {
+                z_in_idx
+            } else if z_in_pos <= z_out_pos {
+                z_in_idx
+            } else {
+                z_out_idx
+            };
+            
+            // Check if adjustment is needed
+            let too_close = amp_sum > max_thresh || voice_count > max_voice;
+            let too_far = amp_sum < min_thresh || voice_count < min_voice;
+            
+            if too_close {
+                // Move stepper up (away from string)
+                stepper_ops.rel_move(stepper_to_move, z_up_step)?;
+                if let Some(pos) = positions.get_mut(stepper_to_move) {
+                    *pos += z_up_step;
+                }
+                messages.push(format!(
+                    "String {}: too close (amp={:.2}, voices={}), moved stepper {} up by {}",
+                    string_idx, amp_sum, voice_count, stepper_to_move, z_up_step
+                ));
+            } else if too_far {
+                // Move stepper down (toward string)
+                stepper_ops.rel_move(stepper_to_move, z_down_step)?;
+                if let Some(pos) = positions.get_mut(stepper_to_move) {
+                    *pos += z_down_step;
+                }
+                messages.push(format!(
+                    "String {}: too far (amp={:.2}, voices={}), moved stepper {} down by {}",
+                    string_idx, amp_sum, voice_count, stepper_to_move, z_down_step
+                ));
+            } else {
+                messages.push(format!(
+                    "String {}: in range (amp={:.2}, voices={})",
+                    string_idx, amp_sum, voice_count
+                ));
+            }
+        }
+        
+        messages.push("Z adjustment complete".to_string());
+        Ok(messages.join("\n"))
+    }
 }
 
