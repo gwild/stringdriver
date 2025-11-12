@@ -45,6 +45,7 @@ uuid = { version = "1", features = ["v4"] }
 dotenvy = "0.15"
 serialport = { version = "4.3", default-features = false, features = ["libudev"] }
 gpiocdev = { version = "0.7", optional = true }
+audio_monitor = { git = "ssh://git@github.com/gwild/audmon.git" }
 
 [features]
 default = []

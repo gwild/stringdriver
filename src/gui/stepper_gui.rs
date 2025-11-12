@@ -1213,12 +1213,20 @@ impl eframe::App for StepperGUI {
                 }
             });
             ui.collapsing("Debug log", |ui| {
-                if ui.button("Clear log").clicked() { self.debug_log.clear(); }
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.debug_log)
-                        .desired_rows(10)
-                        .desired_width(f32::INFINITY)
-                );
+                if ui.button("Clear log").clicked() { 
+                    self.debug_log.clear(); 
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(400.0)
+                    .auto_shrink([false; 2])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.debug_log)
+                                .desired_width(f32::INFINITY)
+                                .interactive(false)
+                        );
+                    });
             });
 
             ctx.request_repaint_after(Duration::from_millis(500));

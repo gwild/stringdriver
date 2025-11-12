@@ -79,6 +79,11 @@ struct OperationsGUI {
     partials_slot: PartialsSlot,
     selected_operation: String,
     arduino_ops: Option<ArduinoStepperOps>,
+    // Thresholds for z_adjust operation
+    voice_count_min: Vec<i32>,  // Per-channel minimum voice count
+    voice_count_max: Vec<i32>,  // Per-channel maximum voice count
+    amp_sum_min: Vec<i32>,      // Per-channel minimum amplitude sum
+    amp_sum_max: Vec<i32>,      // Per-channel maximum amplitude sum
 }
 
 impl OperationsGUI {
@@ -118,12 +123,18 @@ impl OperationsGUI {
             }
         });
         
+        // Initialize thresholds with defaults
+        let string_num = operations.string_num;
         Ok(Self {
             operations,
             message: String::new(),
             partials_slot,
             selected_operation: "None".to_string(),
             arduino_ops: Some(arduino_ops),
+            voice_count_min: vec![2; string_num],
+            voice_count_max: vec![12; string_num],
+            amp_sum_min: vec![20; string_num],
+            amp_sum_max: vec![250; string_num],
         })
     }
     
@@ -175,11 +186,11 @@ impl OperationsGUI {
             }
             "z_adjust" => {
                 self.append_message("Executing Z Adjust...");
-                // Default thresholds (will need to come from config or GUI)
-                let min_thresholds = vec![20.0; self.operations.string_num];
-                let max_thresholds = vec![100.0; self.operations.string_num];
-                let min_voices = vec![0; self.operations.string_num];
-                let max_voices = vec![12; self.operations.string_num];
+                // Use thresholds from GUI
+                let min_thresholds: Vec<f32> = self.amp_sum_min.iter().map(|&v| v as f32).collect();
+                let max_thresholds: Vec<f32> = self.amp_sum_max.iter().map(|&v| v as f32).collect();
+                let min_voices: Vec<usize> = self.voice_count_min.iter().map(|&v| v.max(0) as usize).collect();
+                let max_voices: Vec<usize> = self.voice_count_max.iter().map(|&v| v.max(0) as usize).collect();
                 
                 // Use scoped block to limit borrow lifetime
                 let result = {
@@ -212,6 +223,9 @@ impl OperationsGUI {
 
 impl eframe::App for OperationsGUI {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Request continuous repaints for smooth meter updates
+        ctx.request_repaint_after(Duration::from_millis(16)); // ~60 Hz update rate
+        
         // Update audio analysis from partials slot using get_results module
         let partials = get_results::read_partials_from_slot(&self.partials_slot);
         self.operations.update_audio_analysis_with_partials(partials);
@@ -290,23 +304,137 @@ impl eframe::App for OperationsGUI {
             // Audio analysis display
             ui.heading("Audio Analysis");
             
-            // Voice count display
-            ui.label("Voice Count (per channel):");
+            // Voice count display with horizontal meters and thresholds
+            ui.horizontal(|ui| {
+                ui.label("Voice Count (per channel):");
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.label("Thresholds");
+                });
+            });
+            
             let voice_count = self.operations.get_voice_count();
+            const NUM_PARTIALS: f32 = 12.0; // Number of partials per channel
             for (ch_idx, count) in voice_count.iter().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.label(format!("Ch {}: {}", ch_idx, count));
+                    // Ensure we have enough elements in the vectors
+                    if ch_idx >= self.voice_count_max.len() {
+                        self.voice_count_max.resize(ch_idx + 1, 12);
+                    }
+                    if ch_idx >= self.voice_count_min.len() {
+                        self.voice_count_min.resize(ch_idx + 1, 2);
+                    }
+                    
+                    // Left column: Channel label and meter
+                    ui.label(format!("Ch {}:", ch_idx));
+                    let count_val = *count as i32;
+                    let min_threshold = self.voice_count_min[ch_idx];
+                    let max_threshold = self.voice_count_max[ch_idx];
+                    
+                    // Determine color: blue (below min), green (in range), red (above max)
+                    let color = if count_val < min_threshold {
+                        egui::Color32::from_rgb(0, 100, 255) // Blue
+                    } else if count_val <= max_threshold {
+                        egui::Color32::from_rgb(0, 200, 0) // Green
+                    } else {
+                        egui::Color32::from_rgb(255, 0, 0) // Red
+                    };
+                    
+                    let max_threshold_f = max_threshold as f32;
+                    let progress = if max_threshold_f > 0.0 {
+                        (count_val as f32 / max_threshold_f.max(1.0)).min(1.0)
+                    } else {
+                        0.0
+                    };
+                    let progress_bar = egui::ProgressBar::new(progress)
+                        .fill(color)
+                        .text(format!("{}", count))
+                        .desired_width(200.0);
+                    ui.add(progress_bar);
+                    
+                    // Right column: Threshold controls
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        let mut max_val = self.voice_count_max[ch_idx];
+                        let mut min_val = self.voice_count_min[ch_idx];
+                        
+                        ui.label("min");
+                        ui.add(egui::DragValue::new(&mut min_val).clamp_range(0..=12));
+                        ui.label("max");
+                        ui.add(egui::DragValue::new(&mut max_val).clamp_range(0..=12));
+                        
+                        if max_val != self.voice_count_max[ch_idx] {
+                            self.voice_count_max[ch_idx] = max_val;
+                        }
+                        if min_val != self.voice_count_min[ch_idx] {
+                            self.voice_count_min[ch_idx] = min_val;
+                        }
+                    });
                 });
             }
             
             ui.separator();
             
-            // Amp sum display
-            ui.label("Amplitude Sum (per channel):");
+            // Amp sum display with horizontal meters and thresholds
+            ui.horizontal(|ui| {
+                ui.label("Amplitude Sum (per channel):");
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.label("Thresholds");
+                });
+            });
+            
             let amp_sum = self.operations.get_amp_sum();
             for (ch_idx, sum) in amp_sum.iter().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.label(format!("Ch {}: {:.2}", ch_idx, sum));
+                    // Ensure we have enough elements in the vectors
+                    if ch_idx >= self.amp_sum_max.len() {
+                        self.amp_sum_max.resize(ch_idx + 1, 250);
+                    }
+                    if ch_idx >= self.amp_sum_min.len() {
+                        self.amp_sum_min.resize(ch_idx + 1, 20);
+                    }
+                    
+                    // Left column: Channel label and meter
+                    ui.label(format!("Ch {}:", ch_idx));
+                    let sum_val = *sum;
+                    let min_threshold = self.amp_sum_min[ch_idx] as f32;
+                    let max_threshold = self.amp_sum_max[ch_idx] as f32;
+                    
+                    // Determine color: blue (below min), green (in range), red (above max)
+                    let color = if sum_val < min_threshold {
+                        egui::Color32::from_rgb(0, 100, 255) // Blue
+                    } else if sum_val <= max_threshold {
+                        egui::Color32::from_rgb(0, 200, 0) // Green
+                    } else {
+                        egui::Color32::from_rgb(255, 0, 0) // Red
+                    };
+                    
+                    let progress = if max_threshold > 0.0 {
+                        (sum_val / max_threshold).min(1.0)
+                    } else {
+                        0.0
+                    };
+                    let progress_bar = egui::ProgressBar::new(progress)
+                        .fill(color)
+                        .text(format!("{:.2}", sum))
+                        .desired_width(200.0);
+                    ui.add(progress_bar);
+                    
+                    // Right column: Threshold controls
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        let mut max_val = self.amp_sum_max[ch_idx];
+                        let mut min_val = self.amp_sum_min[ch_idx];
+                        
+                        ui.label("min");
+                        ui.add(egui::DragValue::new(&mut min_val).clamp_range(0..=250));
+                        ui.label("max");
+                        ui.add(egui::DragValue::new(&mut max_val).clamp_range(0..=250));
+                        
+                        if max_val != self.amp_sum_max[ch_idx] {
+                            self.amp_sum_max[ch_idx] = max_val;
+                        }
+                        if min_val != self.amp_sum_min[ch_idx] {
+                            self.amp_sum_min[ch_idx] = min_val;
+                        }
+                    });
                 });
             }
             
@@ -365,17 +493,20 @@ impl eframe::App for OperationsGUI {
             
             ui.separator();
             
-            // Display messages
-            if !self.message.is_empty() {
-                ui.separator();
-                ui.label("Messages:");
+            // Display messages (debug log style)
+            ui.collapsing("Messages", |ui| {
                 egui::ScrollArea::vertical()
-                    .max_height(200.0)
+                    .max_height(400.0)
+                    .auto_shrink([false; 2])
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
-                        ui.text_edit_multiline(&mut self.message);
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.message)
+                                .desired_width(f32::INFINITY)
+                                .interactive(false)
+                        );
                     });
-            }
+            });
         });
     }
 }
@@ -386,7 +517,7 @@ fn main() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Operations Control")
-            .with_inner_size([400.0, 600.0]),
+            .with_inner_size([420.0, 1200.0]),
         ..Default::default()
     };
     
