@@ -805,44 +805,76 @@ impl Operations {
                 continue;
             }
             
-            // Determine which stepper to move (prefer the one closer to 0, or enabled one)
-            let z_in_pos = positions.get(z_in_idx).copied().unwrap_or(0);
-            let z_out_pos = positions.get(z_out_idx).copied().unwrap_or(0);
-            
-            let stepper_to_move = if !z_in_enabled {
-                z_out_idx
-            } else if !z_out_enabled {
-                z_in_idx
-            } else if z_in_pos <= z_out_pos {
-                z_in_idx
-            } else {
-                z_out_idx
-            };
-            
             // Check if adjustment is needed
             let too_close = amp_sum > max_thresh || voice_count > max_voice;
             let too_far = amp_sum < min_thresh || voice_count < min_voice;
             
-            if too_close {
-                // Move stepper up (away from string)
-                stepper_ops.rel_move(stepper_to_move, z_up_step)?;
-                if let Some(pos) = positions.get_mut(stepper_to_move) {
-                    *pos += z_up_step;
+            if too_close || too_far {
+                // Determine which stepper to move based on adjustment direction
+                // Positions can be negative (steppers below zero are closer to string)
+                // More negative = closer to string, more positive = farther from string
+                let z_in_pos = positions.get(z_in_idx).copied().unwrap_or(0);
+                let z_out_pos = positions.get(z_out_idx).copied().unwrap_or(0);
+                
+                let stepper_to_move = if !z_in_enabled {
+                    z_out_idx
+                } else if !z_out_enabled {
+                    z_in_idx
+                } else if too_close {
+                    // Too close: move the stepper that's closest to the string (most negative position)
+                    // Example: if z_in_pos=-10 and z_out_pos=-5, z_in is closer (more negative)
+                    // If equal, alternate to keep balanced
+                    if z_in_pos < z_out_pos {
+                        z_in_idx  // z_in is more negative (closer)
+                    } else if z_out_pos < z_in_pos {
+                        z_out_idx  // z_out is more negative (closer)
+                    } else {
+                        // Equal positions: alternate based on string index to keep balanced
+                        if string_idx % 2 == 0 {
+                            z_in_idx
+                        } else {
+                            z_out_idx
+                        }
+                    }
+                } else {
+                    // too_far: move the stepper that's farthest from the string (most positive/least negative position)
+                    // Example: if z_in_pos=-5 and z_out_pos=-10, z_in is farther (less negative)
+                    // If equal, alternate to keep balanced
+                    if z_in_pos > z_out_pos {
+                        z_in_idx  // z_in is less negative/more positive (farther)
+                    } else if z_out_pos > z_in_pos {
+                        z_out_idx  // z_out is less negative/more positive (farther)
+                    } else {
+                        // Equal positions: alternate based on string index to keep balanced
+                        if string_idx % 2 == 0 {
+                            z_out_idx
+                        } else {
+                            z_in_idx
+                        }
+                    }
+                };
+                
+                if too_close {
+                    // Move stepper up (away from string)
+                    stepper_ops.rel_move(stepper_to_move, z_up_step)?;
+                    if let Some(pos) = positions.get_mut(stepper_to_move) {
+                        *pos += z_up_step;
+                    }
+                    messages.push(format!(
+                        "String {}: too close (amp={:.2}, voices={}), moved stepper {} (closest) up by {}",
+                        string_idx, amp_sum, voice_count, stepper_to_move, z_up_step
+                    ));
+                } else {
+                    // Move stepper down (toward string)
+                    stepper_ops.rel_move(stepper_to_move, z_down_step)?;
+                    if let Some(pos) = positions.get_mut(stepper_to_move) {
+                        *pos += z_down_step;
+                    }
+                    messages.push(format!(
+                        "String {}: too far (amp={:.2}, voices={}), moved stepper {} (farthest) down by {}",
+                        string_idx, amp_sum, voice_count, stepper_to_move, z_down_step
+                    ));
                 }
-                messages.push(format!(
-                    "String {}: too close (amp={:.2}, voices={}), moved stepper {} up by {}",
-                    string_idx, amp_sum, voice_count, stepper_to_move, z_up_step
-                ));
-            } else if too_far {
-                // Move stepper down (toward string)
-                stepper_ops.rel_move(stepper_to_move, z_down_step)?;
-                if let Some(pos) = positions.get_mut(stepper_to_move) {
-                    *pos += z_down_step;
-                }
-                messages.push(format!(
-                    "String {}: too far (amp={:.2}, voices={}), moved stepper {} down by {}",
-                    string_idx, amp_sum, voice_count, stepper_to_move, z_down_step
-                ));
             } else {
                 messages.push(format!(
                     "String {}: in range (amp={:.2}, voices={})",

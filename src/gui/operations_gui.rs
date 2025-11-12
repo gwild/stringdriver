@@ -51,6 +51,14 @@ impl ArduinoStepperOps {
         
         Ok(())
     }
+    
+    /// Read current positions from stepper_gui (not implemented - positions tracked locally)
+    /// For now, we'll track positions locally as we move steppers
+    fn _get_positions(&self) -> Result<Vec<i32>> {
+        // TODO: Could add a "get_positions" command to stepper_gui socket protocol
+        // For now, positions are tracked locally in operations_gui
+        Ok(vec![])
+    }
 }
 
 impl operations::StepperOperations for ArduinoStepperOps {
@@ -84,6 +92,8 @@ struct OperationsGUI {
     voice_count_max: Vec<i32>,  // Per-channel maximum voice count
     amp_sum_min: Vec<i32>,      // Per-channel minimum amplitude sum
     amp_sum_max: Vec<i32>,      // Per-channel maximum amplitude sum
+    // Track stepper positions locally (updated as we move steppers)
+    stepper_positions: std::collections::HashMap<usize, i32>,
 }
 
 impl OperationsGUI {
@@ -135,6 +145,7 @@ impl OperationsGUI {
             voice_count_max: vec![12; string_num],
             amp_sum_min: vec![20; string_num],
             amp_sum_max: vec![250; string_num],
+            stepper_positions: std::collections::HashMap::new(),
         })
     }
     
@@ -154,9 +165,13 @@ impl OperationsGUI {
             return;
         }
         
-        // Get current positions (stub - will need to read from Arduino)
+        // Get current positions - use tracked positions, defaulting to 0
         let z_indices = self.operations.get_z_stepper_indices();
-        let mut positions = vec![0i32; z_indices.iter().max().copied().unwrap_or(0) + 1];
+        let max_idx = z_indices.iter().max().copied().unwrap_or(0);
+        let mut positions = vec![0i32; max_idx + 1];
+        for &idx in &z_indices {
+            positions[idx] = self.stepper_positions.get(&idx).copied().unwrap_or(0);
+        }
         let mut max_positions = std::collections::HashMap::new();
         for &idx in &z_indices {
             max_positions.insert(idx, 100); // Default max position
@@ -207,6 +222,12 @@ impl OperationsGUI {
                 };
                 match result {
                     Ok(msg) => {
+                        // Update tracked positions after z_adjust (handles negative positions)
+                        for &idx in &z_indices {
+                            if let Some(&pos) = positions.get(idx) {
+                                self.stepper_positions.insert(idx, pos);
+                            }
+                        }
                         self.append_message(&msg);
                     }
                     Err(e) => {
