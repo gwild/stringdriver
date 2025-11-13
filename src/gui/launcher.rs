@@ -167,7 +167,7 @@ fn main() {
     
     match Command::new(&operations_gui)
         .spawn() {
-        Ok(child) => {
+        Ok(mut child) => {
             println!("✓ operations_gui launched (PID: {})", child.id());
             // Give it a moment to start and check if it's still running
             std::thread::sleep(std::time::Duration::from_millis(500));
