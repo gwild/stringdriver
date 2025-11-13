@@ -639,8 +639,24 @@ impl eframe::App for OperationsGUI {
 }
 
 fn main() {
+    println!("Operations GUI starting...");
     env_logger::init();
     
+    println!("Creating OperationsGUI instance...");
+    let gui_result = OperationsGUI::new();
+    let gui = match gui_result {
+        Ok(gui) => {
+            println!("✓ OperationsGUI created successfully");
+            gui
+        }
+        Err(e) => {
+            eprintln!("✗ Failed to create OperationsGUI: {}", e);
+            eprintln!("Error details: {:?}", e);
+            std::process::exit(1);
+        }
+    };
+    
+    println!("Initializing GUI window...");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Operations Control")
@@ -648,21 +664,20 @@ fn main() {
         ..Default::default()
     };
     
+    println!("Starting eframe::run_native...");
     if let Err(e) = eframe::run_native(
         "Operations Control",
         options,
         Box::new(|_cc| {
-            match OperationsGUI::new() {
-                Ok(gui) => Box::new(gui),
-                Err(e) => {
-                    eprintln!("Failed to create OperationsGUI: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            println!("✓ GUI window created, entering event loop");
+            Box::new(gui)
         }),
     ) {
-        eprintln!("GUI error: {}", e);
+        eprintln!("✗ GUI error: {}", e);
+        eprintln!("Error details: {:?}", e);
         std::process::exit(1);
     }
+    
+    println!("Operations GUI exiting");
 }
 

@@ -99,17 +99,21 @@ fn main() {
     
     // Always build release binaries to ensure latest code is used
     println!("\nBuilding release binaries...");
-    let build_status = Command::new("cargo")
+    let build_output = Command::new("cargo")
         .args(&["build", "--release", "--bin", "stepper_gui", "--bin", "operations_gui"])
         .current_dir(&project_root)
-        .status();
+        .output();
     
-    match build_status {
-        Ok(status) if status.success() => {
+    match build_output {
+        Ok(output) if output.status.success() => {
             println!("✓ Release binaries built successfully");
         }
-        Ok(status) => {
-            eprintln!("✗ Build failed with exit code: {:?}", status.code());
+        Ok(output) => {
+            eprintln!("✗ Build failed with exit code: {:?}", output.status.code());
+            eprintln!("Build stderr:");
+            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+            eprintln!("Build stdout:");
+            eprintln!("{}", String::from_utf8_lossy(&output.stdout));
             std::process::exit(1);
         }
         Err(e) => {
@@ -121,12 +125,17 @@ fn main() {
     // Launch stepper_gui
     println!("\nLaunching stepper_gui...");
     let stepper_gui = release_dir.join("stepper_gui");
+    
+    // Check if binary exists
+    if !stepper_gui.exists() {
+        eprintln!("✗ stepper_gui binary not found at: {}", stepper_gui.display());
+        std::process::exit(1);
+    }
+    
     match Command::new(&stepper_gui)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
         .spawn() {
-        Ok(_) => {
-            println!("✓ stepper_gui launched");
+        Ok(child) => {
+            println!("✓ stepper_gui launched (PID: {})", child.id());
         }
         Err(e) => {
             eprintln!("✗ Failed to launch stepper_gui: {}", e);
@@ -137,15 +146,49 @@ fn main() {
     // Launch operations_gui
     println!("\nLaunching operations_gui...");
     let operations_gui = release_dir.join("operations_gui");
+    
+    // Check if binary exists
+    if !operations_gui.exists() {
+        eprintln!("✗ operations_gui binary not found at: {}", operations_gui.display());
+        eprintln!("  Expected path: {}", operations_gui.display());
+        eprintln!("  Release directory exists: {}", release_dir.exists());
+        if release_dir.exists() {
+            eprintln!("  Files in release directory:");
+            if let Ok(entries) = std::fs::read_dir(&release_dir) {
+                for entry in entries.flatten() {
+                    if let Ok(name) = entry.file_name().into_string() {
+                        eprintln!("    - {}", name);
+                    }
+                }
+            }
+        }
+        std::process::exit(1);
+    }
+    
     match Command::new(&operations_gui)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
         .spawn() {
-        Ok(_) => {
-            println!("✓ operations_gui launched");
+        Ok(child) => {
+            println!("✓ operations_gui launched (PID: {})", child.id());
+            // Give it a moment to start and check if it's still running
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    eprintln!("✗ operations_gui exited immediately with status: {:?}", status);
+                    eprintln!("  This usually indicates a startup error - check stderr output above");
+                    std::process::exit(1);
+                }
+                Ok(None) => {
+                    println!("  operations_gui is still running");
+                }
+                Err(e) => {
+                    eprintln!("  Warning: Could not check operations_gui status: {}", e);
+                }
+            }
         }
         Err(e) => {
             eprintln!("✗ Failed to launch operations_gui: {}", e);
+            eprintln!("  Binary path: {}", operations_gui.display());
+            eprintln!("  Error details: {:?}", e);
             std::process::exit(1);
         }
     }
