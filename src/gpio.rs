@@ -89,7 +89,7 @@ impl GpioBoard {
     }
     
     /// Create a disabled GPIO board instance
-    fn disabled() -> Self {
+    pub fn disabled() -> Self {
         Self {
             exist: false,
             library: None,

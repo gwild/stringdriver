@@ -14,6 +14,8 @@ use std::fs::OpenOptions;
 use std::path::Path;
 use std::io::Write;
 use memmap2::Mmap;
+use gethostname::gethostname;
+use serde_yaml;
 
 fn main() {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -97,10 +99,23 @@ fn main() {
     }
     println!("✓ Shared memory verified - audio_monitor is running");
     
+    // Check if GPIO is enabled for this host from YAML
+    let gpio_enabled = check_gpio_enabled(&project_root);
+    println!("\nGPIO enabled for this host: {}", gpio_enabled);
+    
     // Always build release binaries to ensure latest code is used
     println!("\nBuilding release binaries...");
+    let mut build_args = vec!["build", "--release"];
+    if gpio_enabled {
+        build_args.push("--features");
+        build_args.push("gpiod");
+    }
+    build_args.push("--bin");
+    build_args.push("stepper_gui");
+    build_args.push("--bin");
+    build_args.push("operations_gui");
     let build_output = Command::new("cargo")
-        .args(&["build", "--release", "--bin", "stepper_gui", "--bin", "operations_gui"])
+        .args(&build_args)
         .current_dir(&project_root)
         .output();
     
@@ -274,6 +289,42 @@ fn wait_for_shared_memory() -> bool {
             if attempt % 10 == 0 {
                 print!(".");
                 std::io::stdout().flush().ok();
+            }
+        }
+    }
+    
+    false
+}
+
+/// Check if GPIO is enabled for the current hostname from YAML config
+fn check_gpio_enabled(project_root: &std::path::Path) -> bool {
+    let yaml_path = project_root.join("string_driver.yaml");
+    let file = match std::fs::File::open(&yaml_path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    
+    let yaml: serde_yaml::Value = match serde_yaml::from_reader(file) {
+        Ok(y) => y,
+        Err(_) => return false,
+    };
+    
+    let hostname = gethostname().to_string_lossy().to_string();
+    
+    // Search across known OS sections to find a host block matching hostname
+    for os_key in ["RaspberryPi", "Ubuntu", "macOS"].iter() {
+        if let Some(os_map) = yaml.get(*os_key).and_then(|v| v.as_mapping()) {
+            for (k, v) in os_map.iter() {
+                if k.as_str() == Some(&hostname) {
+                    if let Some(host_block) = v.as_mapping() {
+                        // Check GPIO_ENABLED
+                        if let Some(gpio_enabled) = host_block.get(&serde_yaml::Value::from("GPIO_ENABLED")) {
+                            if let Some(enabled) = gpio_enabled.as_bool() {
+                                return enabled;
+                            }
+                        }
+                    }
+                }
             }
         }
     }

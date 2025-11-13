@@ -125,7 +125,7 @@ impl Operations {
         let delta_threshold = ops_settings.delta_threshold.unwrap_or(50);
         let z_variance_threshold = ops_settings.z_variance_threshold.unwrap_or(50);
         
-        // Load GPIO if available
+        // Load GPIO if available (required for z_calibration and bump_check)
         let gpio_settings = load_gpio_settings(&hostname)?;
         let gpio = gpio_settings.map(|_| crate::gpio::GpioBoard::new()).transpose()?;
         let arduino_connected = ard_settings.num_steppers > 0;
