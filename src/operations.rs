@@ -65,6 +65,14 @@ pub struct Operations {
     z_up_step: Arc<Mutex<i32>>,
     z_down_step: Arc<Mutex<i32>>,
     bump_disable_threshold: Arc<Mutex<i32>>,
+    tune_rest: Arc<Mutex<f32>>,
+    x_rest: Arc<Mutex<f32>>,
+    z_rest: Arc<Mutex<f32>>,
+    lap_rest: Arc<Mutex<f32>>,
+    adjustment_level: Arc<Mutex<i32>>,
+    retry_threshold: Arc<Mutex<i32>>,
+    delta_threshold: Arc<Mutex<i32>>,
+    z_variance_threshold: Arc<Mutex<i32>>,
     pub z_first_index: usize,
     pub string_num: usize,
     pub bump_retry_counts: BumpRetryCounts,
@@ -105,6 +113,18 @@ impl Operations {
         // Load z_down_step from operations settings (from YAML - default to -2 if not specified)
         let z_down_step = ops_settings.z_down_step.unwrap_or(-2);
         
+        // Load rest values from operations settings (from YAML - defaults from surfer.py)
+        let tune_rest = ops_settings.tune_rest.unwrap_or(10.0);
+        let x_rest = ops_settings.x_rest.unwrap_or(10.0);
+        let z_rest = ops_settings.z_rest.unwrap_or(5.0);
+        let lap_rest = ops_settings.lap_rest.unwrap_or(4.0);
+        
+        // Load adjustment parameters from operations settings (from YAML - defaults from surfer.py)
+        let adjustment_level = ops_settings.adjustment_level.unwrap_or(4);
+        let retry_threshold = ops_settings.retry_threshold.unwrap_or(50);
+        let delta_threshold = ops_settings.delta_threshold.unwrap_or(50);
+        let z_variance_threshold = ops_settings.z_variance_threshold.unwrap_or(50);
+        
         // Load GPIO if available
         let gpio_settings = load_gpio_settings(&hostname)?;
         let gpio = gpio_settings.map(|_| crate::gpio::GpioBoard::new()).transpose()?;
@@ -125,6 +145,14 @@ impl Operations {
             z_up_step: Arc::new(Mutex::new(z_up_step)),
             z_down_step: Arc::new(Mutex::new(z_down_step)),
             bump_disable_threshold: Arc::new(Mutex::new(ops_settings.bump_disable_threshold)),
+            tune_rest: Arc::new(Mutex::new(tune_rest)),
+            x_rest: Arc::new(Mutex::new(x_rest)),
+            z_rest: Arc::new(Mutex::new(z_rest)),
+            lap_rest: Arc::new(Mutex::new(lap_rest)),
+            adjustment_level: Arc::new(Mutex::new(adjustment_level)),
+            retry_threshold: Arc::new(Mutex::new(retry_threshold)),
+            delta_threshold: Arc::new(Mutex::new(delta_threshold)),
+            z_variance_threshold: Arc::new(Mutex::new(z_variance_threshold)),
             z_first_index,
             string_num,
             bump_retry_counts: Arc::new(Mutex::new(HashMap::new())),
@@ -191,6 +219,118 @@ impl Operations {
         self.z_down_step.lock()
             .map(|s| *s)
             .unwrap_or(-2)
+    }
+    
+    /// Set tune_rest value
+    pub fn set_tune_rest(&self, rest: f32) {
+        if let Ok(mut rest_val) = self.tune_rest.lock() {
+            *rest_val = rest;
+        }
+    }
+    
+    /// Get tune_rest value
+    pub fn get_tune_rest(&self) -> f32 {
+        self.tune_rest.lock()
+            .map(|r| *r)
+            .unwrap_or(10.0)
+    }
+    
+    /// Set x_rest value
+    pub fn set_x_rest(&self, rest: f32) {
+        if let Ok(mut rest_val) = self.x_rest.lock() {
+            *rest_val = rest;
+        }
+    }
+    
+    /// Get x_rest value
+    pub fn get_x_rest(&self) -> f32 {
+        self.x_rest.lock()
+            .map(|r| *r)
+            .unwrap_or(10.0)
+    }
+    
+    /// Set z_rest value
+    pub fn set_z_rest(&self, rest: f32) {
+        if let Ok(mut rest_val) = self.z_rest.lock() {
+            *rest_val = rest;
+        }
+    }
+    
+    /// Get z_rest value
+    pub fn get_z_rest(&self) -> f32 {
+        self.z_rest.lock()
+            .map(|r| *r)
+            .unwrap_or(5.0)
+    }
+    
+    /// Set lap_rest value
+    pub fn set_lap_rest(&self, rest: f32) {
+        if let Ok(mut rest_val) = self.lap_rest.lock() {
+            *rest_val = rest;
+        }
+    }
+    
+    /// Get lap_rest value
+    pub fn get_lap_rest(&self) -> f32 {
+        self.lap_rest.lock()
+            .map(|r| *r)
+            .unwrap_or(4.0)
+    }
+    
+    /// Set adjustment_level value
+    pub fn set_adjustment_level(&self, level: i32) {
+        if let Ok(mut level_val) = self.adjustment_level.lock() {
+            *level_val = level;
+        }
+    }
+    
+    /// Get adjustment_level value
+    pub fn get_adjustment_level(&self) -> i32 {
+        self.adjustment_level.lock()
+            .map(|l| *l)
+            .unwrap_or(4)
+    }
+    
+    /// Set retry_threshold value
+    pub fn set_retry_threshold(&self, threshold: i32) {
+        if let Ok(mut thresh) = self.retry_threshold.lock() {
+            *thresh = threshold;
+        }
+    }
+    
+    /// Get retry_threshold value
+    pub fn get_retry_threshold(&self) -> i32 {
+        self.retry_threshold.lock()
+            .map(|t| *t)
+            .unwrap_or(50)
+    }
+    
+    /// Set delta_threshold value
+    pub fn set_delta_threshold(&self, threshold: i32) {
+        if let Ok(mut thresh) = self.delta_threshold.lock() {
+            *thresh = threshold;
+        }
+    }
+    
+    /// Get delta_threshold value
+    pub fn get_delta_threshold(&self) -> i32 {
+        self.delta_threshold.lock()
+            .map(|t| *t)
+            .unwrap_or(50)
+    }
+    
+    /// Set z_variance_threshold value
+    pub fn set_z_variance_threshold(&self, threshold: i32) {
+        if let Ok(mut thresh) = self.z_variance_threshold.lock() {
+            *thresh = threshold;
+        }
+    }
+    
+    /// Get z_variance_threshold value
+    pub fn get_z_variance_threshold(&self) -> i32 {
+        self.z_variance_threshold.lock()
+            .map(|t| *t)
+            .unwrap_or(50)
     }
     
     /// Set bump_disable_threshold value

@@ -280,34 +280,6 @@ impl eframe::App for OperationsGUI {
             
             ui.separator();
             
-            // Z up step spinbox
-            ui.horizontal(|ui| {
-                ui.label("Z Up Step:");
-                let mut z_up_step = self.operations.get_z_up_step();
-                let mut drag = egui::DragValue::new(&mut z_up_step);
-                drag = drag.clamp_range(2..=10);
-                if ui.add(drag).changed() {
-                    self.operations.set_z_up_step(z_up_step);
-                    self.append_message(&format!("Z up step set to {}", z_up_step));
-                }
-            });
-            
-            ui.separator();
-            
-            // Z down step spinbox
-            ui.horizontal(|ui| {
-                ui.label("Z Down Step:");
-                let mut z_down_step = self.operations.get_z_down_step();
-                let mut drag = egui::DragValue::new(&mut z_down_step);
-                drag = drag.clamp_range(-10..=-2);
-                if ui.add(drag).changed() {
-                    self.operations.set_z_down_step(z_down_step);
-                    self.append_message(&format!("Z down step set to {}", z_down_step));
-                }
-            });
-            
-            ui.separator();
-            
             // Bump disable threshold spinbox
             ui.horizontal(|ui| {
                 ui.label("Bump Disable Threshold:");
@@ -317,6 +289,104 @@ impl eframe::App for OperationsGUI {
                 if ui.add(drag).changed() {
                     self.operations.set_bump_disable_threshold(threshold);
                     self.append_message(&format!("Bump disable threshold set to {}", threshold));
+                }
+            });
+            
+            ui.separator();
+            
+            // Adjustment parameters
+            ui.heading("Adjustment Parameters");
+            
+            ui.horizontal(|ui| {
+                ui.label("Adjustment Level:");
+                let mut adjustment_level = self.operations.get_adjustment_level();
+                let mut drag = egui::DragValue::new(&mut adjustment_level);
+                drag = drag.clamp_range(1..=100);
+                if ui.add(drag).changed() {
+                    self.operations.set_adjustment_level(adjustment_level);
+                    self.append_message(&format!("Adjustment level set to {}", adjustment_level));
+                }
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("Retry Threshold:");
+                let mut retry_threshold = self.operations.get_retry_threshold();
+                let mut drag = egui::DragValue::new(&mut retry_threshold);
+                drag = drag.clamp_range(1..=1000);
+                if ui.add(drag).changed() {
+                    self.operations.set_retry_threshold(retry_threshold);
+                    self.append_message(&format!("Retry threshold set to {}", retry_threshold));
+                }
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("Delta Threshold:");
+                let mut delta_threshold = self.operations.get_delta_threshold();
+                let mut drag = egui::DragValue::new(&mut delta_threshold);
+                drag = drag.clamp_range(1..=1000);
+                if ui.add(drag).changed() {
+                    self.operations.set_delta_threshold(delta_threshold);
+                    self.append_message(&format!("Delta threshold set to {}", delta_threshold));
+                }
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("Z Variance Threshold:");
+                let mut z_variance_threshold = self.operations.get_z_variance_threshold();
+                let mut drag = egui::DragValue::new(&mut z_variance_threshold);
+                drag = drag.clamp_range(1..=1000);
+                if ui.add(drag).changed() {
+                    self.operations.set_z_variance_threshold(z_variance_threshold);
+                    self.append_message(&format!("Z variance threshold set to {}", z_variance_threshold));
+                }
+            });
+            
+            ui.separator();
+            
+            // Rest timing values
+            ui.heading("Timing (Rest Values)");
+            
+            ui.horizontal(|ui| {
+                ui.label("Tune Rest:");
+                let mut tune_rest = self.operations.get_tune_rest();
+                let mut drag = egui::DragValue::new(&mut tune_rest).speed(0.1);
+                drag = drag.clamp_range(0.0..=100.0);
+                if ui.add(drag).changed() {
+                    self.operations.set_tune_rest(tune_rest);
+                    self.append_message(&format!("Tune rest set to {:.2}", tune_rest));
+                }
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("X Rest:");
+                let mut x_rest = self.operations.get_x_rest();
+                let mut drag = egui::DragValue::new(&mut x_rest).speed(0.1);
+                drag = drag.clamp_range(0.0..=100.0);
+                if ui.add(drag).changed() {
+                    self.operations.set_x_rest(x_rest);
+                    self.append_message(&format!("X rest set to {:.2}", x_rest));
+                }
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("Z Rest:");
+                let mut z_rest = self.operations.get_z_rest();
+                let mut drag = egui::DragValue::new(&mut z_rest).speed(0.1);
+                drag = drag.clamp_range(0.0..=100.0);
+                if ui.add(drag).changed() {
+                    self.operations.set_z_rest(z_rest);
+                    self.append_message(&format!("Z rest set to {:.2}", z_rest));
+                }
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("Lap Rest:");
+                let mut lap_rest = self.operations.get_lap_rest();
+                let mut drag = egui::DragValue::new(&mut lap_rest).speed(0.1);
+                drag = drag.clamp_range(0.0..=100.0);
+                if ui.add(drag).changed() {
+                    self.operations.set_lap_rest(lap_rest);
+                    self.append_message(&format!("Lap rest set to {:.2}", lap_rest));
                 }
             });
             
@@ -469,27 +539,63 @@ impl eframe::App for OperationsGUI {
             let bump_status = self.operations.get_bump_status();
             let bump_map: std::collections::HashMap<usize, bool> = bump_status.iter().cloned().collect();
             
-            for &stepper_idx in &z_indices {
+            // Arrange steppers in pairs matching stepper_gui layout:
+            // Left column: "out" stepper (odd index, Stepper2)
+            // Right column: "in" stepper (even index, Stepper1)
+            let num_pairs = self.operations.string_num;
+            let z_first = self.operations.z_first_index;
+            
+            for row in 0..num_pairs {
+                let left_idx = z_first + (row * 2) + 1;  // "out" stepper (odd)
+                let right_idx = z_first + (row * 2);     // "in" stepper (even)
+                
+                // Check if indices are valid
+                if !z_indices.contains(&left_idx) || !z_indices.contains(&right_idx) {
+                    continue;
+                }
+                
                 ui.horizontal(|ui| {
-                    let mut enabled = self.operations.get_stepper_enabled(stepper_idx);
-                    let is_bumping = bump_map.get(&stepper_idx).copied().unwrap_or(false);
+                    // Left column: "out" stepper (Stepper2)
+                    ui.vertical(|ui| {
+                        let mut enabled = self.operations.get_stepper_enabled(left_idx);
+                        let is_bumping = bump_map.get(&left_idx).copied().unwrap_or(false);
+                        
+                        let status_indicator = if is_bumping { " 🔴" } else { " ⚪" };
+                        let label = format!("Stepper {} (Z{}){}", 
+                            left_idx, 
+                            left_idx - z_first,
+                            status_indicator);
+                        
+                        if ui.checkbox(&mut enabled, &label).changed() {
+                            self.operations.set_stepper_enabled(left_idx, enabled);
+                            self.append_message(&format!("Stepper {} {}", left_idx, if enabled { "enabled" } else { "disabled" }));
+                        }
+                        
+                        if is_bumping {
+                            ui.colored_label(egui::Color32::RED, "BUMPING");
+                        }
+                    });
                     
-                    // Create label with bump status indicator
-                    let status_indicator = if is_bumping { " 🔴" } else { " ⚪" };
-                    let label = format!("Stepper {} (Z{}){}", 
-                        stepper_idx, 
-                        stepper_idx - self.operations.z_first_index,
-                        status_indicator);
-                    
-                    if ui.checkbox(&mut enabled, &label).changed() {
-                        self.operations.set_stepper_enabled(stepper_idx, enabled);
-                        self.append_message(&format!("Stepper {} {}", stepper_idx, if enabled { "enabled" } else { "disabled" }));
-                    }
-                    
-                    // Show bump status text
-                    if is_bumping {
-                        ui.colored_label(egui::Color32::RED, "BUMPING");
-                    }
+                    // Right column: "in" stepper (Stepper1)
+                    ui.vertical(|ui| {
+                        let mut enabled = self.operations.get_stepper_enabled(right_idx);
+                        let is_bumping = bump_map.get(&right_idx).copied().unwrap_or(false);
+                        
+                        let status_indicator = if is_bumping { " 🔴" } else { " ⚪" };
+                        let label = format!("Stepper {} (Z{}){}", 
+                            right_idx, 
+                            right_idx - z_first,
+                            status_indicator);
+                        
+                        if ui.checkbox(&mut enabled, &label).changed() {
+                            self.operations.set_stepper_enabled(right_idx, enabled);
+                            self.append_message(&format!("Stepper {} {}", right_idx, if enabled { "enabled" } else { "disabled" }));
+                        }
+                        
+                        if is_bumping {
+                            ui.colored_label(egui::Color32::RED, "BUMPING");
+                        }
+                    });
                 });
             }
             

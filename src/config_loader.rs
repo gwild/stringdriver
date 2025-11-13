@@ -116,6 +116,14 @@ pub struct OperationsSettings {
     pub bump_check_enable: bool,
     pub bump_check_repeat: u32,
     pub bump_disable_threshold: i32,
+    pub tune_rest: Option<f32>,
+    pub x_rest: Option<f32>,
+    pub z_rest: Option<f32>,
+    pub lap_rest: Option<f32>,
+    pub adjustment_level: Option<i32>,
+    pub retry_threshold: Option<i32>,
+    pub delta_threshold: Option<i32>,
+    pub z_variance_threshold: Option<i32>,
 }
 
 /// Load operations settings for a given hostname from string_driver.yaml.
@@ -164,12 +172,52 @@ pub fn load_operations_settings(hostname: &str) -> Result<OperationsSettings> {
         .map(|v| v as i32)
         .unwrap_or(3);
 
+    let tune_rest = host_block.get(&serde_yaml::Value::from("TUNE_REST"))
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+
+    let x_rest = host_block.get(&serde_yaml::Value::from("X_REST"))
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+
+    let z_rest = host_block.get(&serde_yaml::Value::from("Z_REST"))
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+
+    let lap_rest = host_block.get(&serde_yaml::Value::from("LAP_REST"))
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+
+    let adjustment_level = host_block.get(&serde_yaml::Value::from("ADJUSTMENT_LEVEL"))
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
+
+    let retry_threshold = host_block.get(&serde_yaml::Value::from("RETRY_THRESHOLD"))
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
+
+    let delta_threshold = host_block.get(&serde_yaml::Value::from("DELTA_THRESHOLD"))
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
+
+    let z_variance_threshold = host_block.get(&serde_yaml::Value::from("Z_VARIANCE_THRESHOLD"))
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
+
     Ok(OperationsSettings {
         z_up_step,
         z_down_step,
         bump_check_enable,
         bump_check_repeat,
         bump_disable_threshold,
+        tune_rest,
+        x_rest,
+        z_rest,
+        lap_rest,
+        adjustment_level,
+        retry_threshold,
+        delta_threshold,
+        z_variance_threshold,
     })
 }
 

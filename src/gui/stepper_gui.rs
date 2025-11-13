@@ -56,6 +56,8 @@ struct StepperGUI {
     z_speed: i32,
     z_min: i32,
     z_max: i32,
+    z_up_step: i32,
+    z_down_step: i32,
     socket_path: String,
 }
 
@@ -91,13 +93,15 @@ impl Default for StepperGUI {
             z_speed: 100,
             z_min: -100,
             z_max: 100,
+            z_up_step: 2,
+            z_down_step: -2,
             socket_path: String::new(),
         }
     }
 }
 
 impl StepperGUI {
-    fn new(port_path: String, num_steppers: usize, string_num: usize, x_step_index: Option<usize>, z_first_index: Option<usize>, tuner_first_index: Option<usize>, tuner_port_path: Option<String>, tuner_num_steppers: Option<usize>, debug: bool, debug_file: Option<File>) -> Self {
+    fn new(port_path: String, num_steppers: usize, string_num: usize, x_step_index: Option<usize>, z_first_index: Option<usize>, tuner_first_index: Option<usize>, tuner_port_path: Option<String>, tuner_num_steppers: Option<usize>, debug: bool, debug_file: Option<File>, z_up_step: i32, z_down_step: i32) -> Self {
         let mut s = Self::default();
         s.port_path = port_path;
         s.positions = vec![0; num_steppers];
@@ -122,6 +126,8 @@ impl StepperGUI {
                 s.tuner_max = 25000;
             }
         }
+        s.z_up_step = z_up_step;
+        s.z_down_step = z_down_step;
         s.log(&format!("Initialized: {} steppers, {} active string pairs", num_steppers, string_num));
         if tuner_first_index.is_some() {
             if tuner_port_path.is_some() {
@@ -918,6 +924,19 @@ impl eframe::App for StepperGUI {
                         self.apply_z_params_to_all();
                     }
                 });
+                ui.horizontal(|ui| {
+                    ui.add_space(30.0); // Indent to align with above row
+                    let mut down_step = self.z_down_step;
+                    let down_response = ui.add(egui::DragValue::new(&mut down_step).speed(1.0).clamp_range(-10..=-2).prefix("Down Step: "));
+                    if down_response.changed() {
+                        self.z_down_step = down_step;
+                    }
+                    let mut up_step = self.z_up_step;
+                    let up_response = ui.add(egui::DragValue::new(&mut up_step).speed(1.0).clamp_range(2..=10).prefix("Up Step: "));
+                    if up_response.changed() {
+                        self.z_up_step = up_step;
+                    }
+                });
                 ui.separator();
 
                 // Arrange z-steppers in pairs using Z_FIRST_INDEX from config
@@ -984,7 +1003,7 @@ impl eframe::App for StepperGUI {
                                     
                                     // Inc (+) button above number box
                                     if ui.button("+").clicked() {
-                                        self.move_stepper(left_idx, 2); // Fixed 2 steps for inc/dec
+                                        self.move_stepper(left_idx, self.z_up_step);
                                     }
                                     
                                     // Use DragValue for proper number input, but only commit on Enter
@@ -1018,7 +1037,7 @@ impl eframe::App for StepperGUI {
                                     
                                     // Dec (-) button below number box
                                     if ui.button("-").clicked() {
-                                        self.move_stepper(left_idx, -2); // Fixed 2 steps for inc/dec
+                                        self.move_stepper(left_idx, self.z_down_step);
                                     }
                                 });
                             });
@@ -1064,7 +1083,7 @@ impl eframe::App for StepperGUI {
                                     
                                     // Inc (+) button above number box
                                     if ui.button("+").clicked() {
-                                        self.move_stepper(right_idx, 2); // Fixed 2 steps for inc/dec
+                                        self.move_stepper(right_idx, self.z_up_step);
                                     }
                                     
                                     // Use DragValue for proper number input, but only commit on Enter
@@ -1098,7 +1117,7 @@ impl eframe::App for StepperGUI {
                                     
                                     // Dec (-) button below number box
                                     if ui.button("-").clicked() {
-                                        self.move_stepper(right_idx, -2); // Fixed 2 steps for inc/dec
+                                        self.move_stepper(right_idx, self.z_down_step);
                                     }
                                 });
                             });
@@ -1250,6 +1269,31 @@ fn main() {
         Err(e) => panic!("Missing/invalid Arduino settings in YAML for host '{}': {}", hostname, e),
     };
 
+    // Load operations settings for z_up_step and z_down_step
+    let ops_settings = match config_loader::load_operations_settings(&hostname) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Warning: Could not load operations settings: {}. Using defaults.", e);
+            config_loader::OperationsSettings {
+                z_up_step: Some(2),
+                z_down_step: Some(-2),
+                bump_check_enable: false,
+                bump_check_repeat: 1,
+                bump_disable_threshold: 0,
+                tune_rest: Some(10.0),
+                x_rest: Some(10.0),
+                z_rest: Some(5.0),
+                lap_rest: Some(4.0),
+                adjustment_level: Some(4),
+                retry_threshold: Some(50),
+                delta_threshold: Some(50),
+                z_variance_threshold: Some(50),
+            }
+        }
+    };
+    let z_up_step = ops_settings.z_up_step.unwrap_or(2);
+    let z_down_step = ops_settings.z_down_step.unwrap_or(-2);
+
     let mut app = StepperGUI::new(
         settings.port.clone(),
         settings.num_steppers,
@@ -1260,7 +1304,9 @@ fn main() {
         settings.ard_t_port.clone(),
         settings.ard_t_num_steppers,
         args.debug,
-        debug_file
+        debug_file,
+        z_up_step,
+        z_down_step
     );
     
     // Auto-connect on startup (mirror Python's automatic arduino_init)
