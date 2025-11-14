@@ -800,9 +800,14 @@ impl Operations {
                             if let Some(&is_touching) = states.get(0) {
                                 if !is_touching {
                                     // No longer touching - success
+                                    let iterations_i32 = i32::try_from(iterations)
+                                        .map_err(|_| anyhow!("bump_check iterations overflow i32"))?;
+                                    let total_step = z_up_step
+                                        .checked_mul(iterations_i32)
+                                        .ok_or_else(|| anyhow!("bump_check move overflow"))?;
                                     messages.push(format!(
                                         "\nStepper {} cleared - moved up {} steps",
-                                        stepper_idx, z_up_step * iterations
+                                        stepper_idx, total_step
                                     ));
                                     break;
                                 }
