@@ -10,10 +10,8 @@
 
 use std::process::Command;
 use std::env;
-use std::fs::OpenOptions;
 use std::path::Path;
 use std::io::Write;
-use memmap2::Mmap;
 use gethostname::gethostname;
 use serde_yaml;
 
@@ -86,8 +84,9 @@ fn main() {
     println!("\nWaiting for audio_monitor to initialize and write to shared memory...");
     let shm_path = get_shared_memory_path();
     println!("  Checking shared memory at: {}", shm_path);
-    if !wait_for_shared_memory() {
-        eprintln!("✗ Timeout waiting for shared memory to have results");
+    let shm_ready = wait_for_shared_memory();
+    if !shm_ready {
+        eprintln!("⚠ Warning: Timeout waiting for shared memory to have results");
         eprintln!("  audio_monitor may not be running correctly");
         eprintln!("  Shared memory path: {}", shm_path);
         if Path::new(&shm_path).exists() {
@@ -95,9 +94,10 @@ fn main() {
         } else {
             eprintln!("  File does not exist");
         }
-        std::process::exit(1);
+        eprintln!("  Continuing anyway to launch stepper_gui and operations_gui...");
+    } else {
+        println!("✓ Shared memory verified - audio_monitor is running");
     }
-    println!("✓ Shared memory verified - audio_monitor is running");
     
     // Check if GPIO is enabled for this host from YAML
     let gpio_enabled = check_gpio_enabled(&project_root);
@@ -226,7 +226,8 @@ fn get_shared_memory_path() -> String {
     format!("{}/audio_peaks", shm_dir)
 }
 
-/// Check if shared memory has valid data (any non-zero bytes indicating audmon is writing)
+/// Check if shared memory file exists and has been created by audio_monitor
+/// audio_monitor creates the file when it starts, so if it exists with reasonable size, it's ready
 fn check_shared_memory_has_data() -> bool {
     let shm_path = get_shared_memory_path();
     
@@ -235,38 +236,14 @@ fn check_shared_memory_has_data() -> bool {
         return false;
     }
     
-    // Try to open and read the shared memory file
-    let file = match OpenOptions::new().read(true).open(&shm_path) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    
-    let mmap = match unsafe { Mmap::map(&file) } {
-        Ok(m) => m,
-        Err(_) => return false,
-    };
-    
-    // Need at least 8 bytes (one partial: f32 freq + f32 amp)
-    if mmap.len() < 8 {
-        return false;
-    }
-    
-    // Check for any non-zero data in the file (audmon writes partials, so if file is all zeros, it's not ready)
-    // Scan through the file looking for any non-zero bytes
-    // We'll check in chunks to avoid scanning the entire 4MB file
-    let check_size = mmap.len().min(8192); // Check first 8KB which should contain at least some partials
-    for chunk in mmap[..check_size].chunks(8) {
-        if chunk.len() >= 8 {
-            // Check if this 8-byte chunk (one partial) has non-zero data
-            let has_data = chunk.iter().any(|&b| b != 0);
-            if has_data {
-                // Verify it's a valid partial by checking if frequency is reasonable (> 0 and < 20000 Hz)
-                let freq_bytes = [chunk[0], chunk[1], chunk[2], chunk[3]];
-                let freq = f32::from_ne_bytes(freq_bytes);
-                if freq > 0.0 && freq < 20000.0 {
-                    return true;
-                }
-            }
+    // Check file size - audio_monitor creates a file of a specific size (typically 4MB for partials)
+    // If file exists and has reasonable size (> 0 bytes), audio_monitor is running
+    if let Ok(metadata) = std::fs::metadata(&shm_path) {
+        let size = metadata.len();
+        // File exists and has some size - audio_monitor is running
+        // Don't require valid audio data since there might not be audio input yet
+        if size > 0 {
+            return true;
         }
     }
     
