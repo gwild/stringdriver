@@ -10,6 +10,7 @@ use crate::gpio;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::fs::OpenOptions;
+use std::time::Duration;
 use memmap2::Mmap;
 
 /// Type alias for partials data: Vec<Vec<(f32, f32)>> where each inner Vec is a channel's partials (freq, amp)
@@ -238,6 +239,46 @@ impl Operations {
         self.z_rest.lock()
             .map(|r| *r)
             .unwrap_or(5.0)
+    }
+
+    fn sleep_for(seconds: f32) {
+        if seconds > 0.0 {
+            std::thread::sleep(Duration::from_secs_f32(seconds));
+        }
+    }
+
+    fn rest_z(&self) {
+        Self::sleep_for(self.get_z_rest());
+    }
+
+    fn rest_x(&self) {
+        Self::sleep_for(self.get_x_rest());
+    }
+
+    fn rest_tune(&self) {
+        Self::sleep_for(self.get_tune_rest());
+    }
+
+    fn rest_lap(&self) {
+        Self::sleep_for(self.get_lap_rest());
+    }
+
+    fn rel_move_z<T: StepperOperations>(&self, stepper_ops: &mut T, stepper: usize, delta: i32) -> Result<()> {
+        stepper_ops.rel_move(stepper, delta)?;
+        self.rest_z();
+        Ok(())
+    }
+
+    fn rel_move_x<T: StepperOperations>(&self, stepper_ops: &mut T, stepper: usize, delta: i32) -> Result<()> {
+        stepper_ops.rel_move(stepper, delta)?;
+        self.rest_x();
+        Ok(())
+    }
+
+    fn rel_move_tune<T: StepperOperations>(&self, stepper_ops: &mut T, stepper: usize, delta: i32) -> Result<()> {
+        stepper_ops.rel_move(stepper, delta)?;
+        self.rest_tune();
+        Ok(())
     }
     
     /// Set lap_rest value
@@ -506,48 +547,44 @@ impl Operations {
     ///
     /// For each enabled Z-stepper (or the specified index):
     /// 1. Poll the touch sensor; if not bumping, do nothing.
-    /// 2. If bumping, issue repeated upward moves of `z_up_step` until the sensor clears
-    ///    or the reported position reaches `max_pos`.
+    /// 2. If bumping, issue repeated upward moves of `z_up_step`, resting `z_rest` between moves,
+    ///    until the sensor clears or the reported position reaches `max_pos`.
     /// 3. When the sensor clears, reset the controller position to `z_up_step` (no hardware motion).
     /// 4. If the sensor never clears and the stepper is already at/above `max_pos`, disable it.
-    pub fn bump_check_static<T: StepperOperations>(
+    pub fn bump_check<T: StepperOperations>(
+        &self,
         stepper_index: Option<usize>,
         positions: &mut [i32],
-        enabled_states: &HashMap<usize, bool>,
         max_positions: &HashMap<usize, i32>,
-        string_num: usize,
-        z_first_index: usize,
-        z_up_step: i32,
-        gpio: &crate::gpio::GpioBoard,
-        bump_check_enable: bool,
         stepper_ops: &mut T,
         exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<String> {
-        // When bump-check is disabled we just exit early without logging
-        if !bump_check_enable {
+        if !self.get_bump_check_enable() {
             return Ok(String::new());
         }
 
+        let gpio = self.gpio.as_ref().ok_or_else(|| anyhow!("GPIO not initialized"))?;
         if !gpio.exist {
             return Ok("\nno GPIO".to_string());
         }
 
-        // Get all Z-stepper indices
-        let mut all_z_indices = Vec::new();
-        for i in 0..(string_num * 2) {
-            let idx = z_first_index + i;
-            all_z_indices.push(idx);
-        }
-        
-        if all_z_indices.is_empty() {
-            return Ok(String::new());
-        }
-
+        let z_up_step = self.get_z_up_step();
         if z_up_step <= 0 {
             return Err(anyhow!(
                 "Invalid z_up_step {} for bump_check: value must be positive to move away from the string",
                 z_up_step
             ));
+        }
+
+        // Get all Z-stepper indices
+        let mut all_z_indices = Vec::new();
+        for i in 0..(self.string_num * 2) {
+            let idx = self.z_first_index + i;
+            all_z_indices.push(idx);
+        }
+        
+        if all_z_indices.is_empty() {
+            return Ok(String::new());
         }
 
         // Build the list of steppers to probe: either all, or one specified
@@ -562,8 +599,8 @@ impl Operations {
             all_z_indices.clone()
         };
 
+        let enabled_states = self.get_all_stepper_enabled();
         let mut messages = Vec::new();
-        const MAX_MOVE_ITERATIONS: u32 = 50;
 
         for &stepper_idx in &steppers_to_check {
             if let Some(exit) = exit_flag {
@@ -577,29 +614,28 @@ impl Operations {
                 continue;
             }
 
-            let gpio_index = stepper_idx.saturating_sub(z_first_index);
+            let gpio_index = stepper_idx.saturating_sub(self.z_first_index);
             let max_pos = max_positions.get(&stepper_idx).copied().unwrap_or(100);
             let mut cleared = false;
 
-            let is_bumping = match gpio.press_check(Some(gpio_index)) {
-                Ok(states) => states.get(0).copied().unwrap_or(false),
-                Err(e) => {
-                    messages.push(format!("GPIO error for stepper {}: {}", stepper_idx, e));
-                    false
-                }
-            };
-
-            if !is_bumping {
-                continue;
-            }
-
-            let mut iterations = 0u32;
-
-            while iterations < MAX_MOVE_ITERATIONS {
+            loop {
                 if let Some(exit) = exit_flag {
                     if exit.load(std::sync::atomic::Ordering::Relaxed) {
                         return Ok(messages.join("\n"));
                     }
+                }
+
+                let is_bumping = match gpio.press_check(Some(gpio_index)) {
+                    Ok(states) => states.get(0).copied().unwrap_or(false),
+                    Err(e) => {
+                        messages.push(format!("GPIO error for stepper {}: {}", stepper_idx, e));
+                        false
+                    }
+                };
+
+                if !is_bumping {
+                    cleared = true;
+                    break;
                 }
 
                 let current_pos = positions.get(stepper_idx).copied().unwrap_or(0);
@@ -614,35 +650,10 @@ impl Operations {
 
                 let remaining = max_pos - current_pos;
                 let move_delta = remaining.min(z_up_step);
-                stepper_ops.rel_move(stepper_idx, move_delta)?;
+                self.rel_move_z(stepper_ops, stepper_idx, move_delta)?;
                 if let Some(pos) = positions.get_mut(stepper_idx) {
                     *pos += move_delta;
                 }
-
-                std::thread::sleep(std::time::Duration::from_millis(100));
-
-                match gpio.press_check(Some(gpio_index)) {
-                    Ok(states) => {
-                        if let Some(false) = states.get(0) {
-                            cleared = true;
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        messages.push(format!("GPIO error for stepper {}: {}", stepper_idx, e));
-                        break;
-                    }
-                }
-
-                iterations += 1;
-            }
-
-            if iterations >= MAX_MOVE_ITERATIONS {
-                stepper_ops.disable(stepper_idx)?;
-                messages.push(format!(
-                    "\nCRITICAL: Stepper {} exceeded {} move attempts while bumping - disabling.",
-                    stepper_idx, MAX_MOVE_ITERATIONS
-                ));
             }
 
             if cleared {
@@ -658,36 +669,6 @@ impl Operations {
         }
 
         Ok(messages.join("\n"))
-    }
-    
-    /// Perform bump check on Z-steppers (instance method wrapper).
-    /// 
-    /// This is a convenience wrapper around `bump_check_static` that uses
-    /// the instance's internal state.
-    pub fn bump_check<T: StepperOperations>(
-        &self,
-        stepper_index: Option<usize>,
-        positions: &mut [i32],
-        max_positions: &HashMap<usize, i32>,
-        stepper_ops: &mut T,
-        exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
-    ) -> Result<String> {
-        let gpio = self.gpio.as_ref().ok_or_else(|| anyhow!("GPIO not initialized"))?;
-        let enabled_states = self.get_all_stepper_enabled();
-        let z_up_step = self.get_z_up_step();
-        Self::bump_check_static(
-            stepper_index,
-            positions,
-            &enabled_states,
-            max_positions,
-            self.string_num,
-            self.z_first_index,
-            z_up_step,
-            gpio,
-            self.get_bump_check_enable(),
-            stepper_ops,
-            exit_flag,
-        )
     }
     
     /// Z-calibrate: Move Z steppers down until they touch sensors, then reset to 0.
@@ -717,9 +698,6 @@ impl Operations {
         // Temporarily disable bump_check (like surfer.py does)
         let original_bump_check = self.get_bump_check_enable();
         self.set_bump_check_enable(false);
-        
-        // Get z_rest timing for moves
-        let z_rest_ms = (self.get_z_rest() * 1000.0) as u64;
         
         let z_indices = self.get_z_stepper_indices();
         let enabled_states = self.get_all_stepper_enabled();
@@ -801,12 +779,12 @@ impl Operations {
                 }
                 
                 // Move down (like surfer.py's rmove with down_step)
-                stepper_ops.rel_move(stepper_idx, z_down_step)?;
+                self.rel_move_z(stepper_ops, stepper_idx, z_down_step)?;
                 pos_local += z_down_step; // Update local position tracker
                 steps_moved += z_down_step.abs();
                 
                 // Wait using z_rest timing (like surfer.py's waiter(config.ins.z_rest))
-                std::thread::sleep(std::time::Duration::from_millis(z_rest_ms));
+                self.rest_z();
             }
             
             if touched {
@@ -1006,7 +984,7 @@ impl Operations {
                 
                 if too_close {
                     // Move stepper up (away from string)
-                    stepper_ops.rel_move(stepper_to_move, z_up_step)?;
+                    self.rel_move_z(stepper_ops, stepper_to_move, z_up_step)?;
                     if let Some(pos) = positions.get_mut(stepper_to_move) {
                         *pos += z_up_step;
                     }
@@ -1016,7 +994,7 @@ impl Operations {
                     ));
                 } else {
                     // Move stepper down (toward string)
-                    stepper_ops.rel_move(stepper_to_move, z_down_step)?;
+                    self.rel_move_z(stepper_ops, stepper_to_move, z_down_step)?;
                     if let Some(pos) = positions.get_mut(stepper_to_move) {
                         *pos += z_down_step;
                     }
