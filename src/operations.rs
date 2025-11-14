@@ -568,7 +568,7 @@ impl Operations {
     /// Returns message string describing results
     pub fn bump_check_static<T: StepperOperations>(
         stepper_index: Option<usize>,
-        positions: &[i32],
+        positions: &mut [i32],
         enabled_states: &HashMap<usize, bool>,
         max_positions: &HashMap<usize, i32>,
         string_num: usize,
@@ -692,14 +692,36 @@ impl Operations {
                 break; // Exit loop - no enabled steppers bumping
             }
 
-            // Handle enabled steppers that are bumping
+            // Handle enabled steppers that are bumping - actively move them up until not touching
             for (idx, &stepper_idx) in steppers_to_check.iter().enumerate() {
                 let enabled = enabled_states.get(&stepper_idx).copied().unwrap_or(false);
                 if !enabled || !bump_statuses[idx] {
                     continue;
                 }
 
-                let current_pos = positions.get(stepper_idx).copied().unwrap_or(0);
+                let gpio_index = stepper_idx.saturating_sub(z_first_index);
+                // Get current position without borrowing (copy the value)
+                let current_pos = if stepper_idx < positions.len() {
+                    positions[stepper_idx]
+                } else {
+                    0
+                };
+                let max_pos = max_positions.get(&stepper_idx).copied().unwrap_or(100);
+
+                // Check if at max_pos and still touching -> disable and reset to 0
+                if current_pos >= max_pos {
+                    stepper_ops.reset(stepper_idx, 0)?;
+                    stepper_ops.disable(stepper_idx)?;
+                    messages.push(format!(
+                        "\nCRITICAL: DISABLING stepper {}. Reason: Bumping at max_pos {} and still touching.",
+                        stepper_idx, max_pos
+                    ));
+                    // Reset retry counter
+                    if let Ok(mut counts) = bump_retry_counts.lock() {
+                        counts.insert(stepper_idx, 0);
+                    }
+                    continue;
+                }
 
                 // Check if position > bump_disable_threshold and still bumping -> disable
                 if current_pos > bump_disable_threshold {
@@ -716,13 +738,77 @@ impl Operations {
                     continue;
                 }
 
-                // Recovery: set to 0 and move up by z_up_step
-                stepper_ops.reset(stepper_idx, 0)?;
-                stepper_ops.rel_move(stepper_idx, z_up_step)?;
-                messages.push(format!(
-                    "\nStepper {} bumping - reset to 0, moved up {} (z_up_step).",
-                    stepper_idx, z_up_step
-                ));
+                // Actively move up by z_up_step until not touching
+                let mut still_touching = true;
+                let mut moved_up = false;
+                while still_touching {
+                    // Move up by z_up_step
+                    stepper_ops.rel_move(stepper_idx, z_up_step)?;
+                    moved_up = true;
+                    if let Some(pos) = positions.get_mut(stepper_idx) {
+                        *pos += z_up_step;
+                    }
+                    
+                    // Wait a bit for the move to complete
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    
+                    // Check if still touching
+                    match gpio.press_check(Some(gpio_index)) {
+                        Ok(states) => {
+                            if let Some(&is_touching) = states.get(0) {
+                                still_touching = is_touching;
+                                if !is_touching {
+                                    // Not touching anymore - reset to z_up_step position
+                                    stepper_ops.reset(stepper_idx, z_up_step)?;
+                                    if let Some(pos) = positions.get_mut(stepper_idx) {
+                                        *pos = z_up_step;
+                                    }
+                                    messages.push(format!(
+                                        "\nStepper {} cleared - moved up and reset to position {} (z_up_step).",
+                                        stepper_idx, z_up_step
+                                    ));
+                                }
+                            } else {
+                                // No state - assume cleared
+                                still_touching = false;
+                                stepper_ops.reset(stepper_idx, z_up_step)?;
+                                if let Some(pos) = positions.get_mut(stepper_idx) {
+                                    *pos = z_up_step;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            messages.push(format!("GPIO error checking stepper {}: {}", stepper_idx, e));
+                            break;
+                        }
+                    }
+                    
+                    // Safety check - if we've moved up a lot and still touching, break
+                    let current_pos_check = if stepper_idx < positions.len() {
+                        positions[stepper_idx]
+                    } else {
+                        0
+                    };
+                    if current_pos_check > bump_disable_threshold {
+                        messages.push(format!(
+                            "\nStepper {} still touching after multiple moves - disabling",
+                            stepper_idx
+                        ));
+                        stepper_ops.reset(stepper_idx, 0)?;
+                        stepper_ops.disable(stepper_idx)?;
+                        if let Ok(mut counts) = bump_retry_counts.lock() {
+                            counts.insert(stepper_idx, 0);
+                        }
+                        break;
+                    }
+                }
+                
+                if moved_up && still_touching {
+                    messages.push(format!(
+                        "\nStepper {} bumping - moved up {} (z_up_step).",
+                        stepper_idx, z_up_step
+                    ));
+                }
             }
         }
 
@@ -736,7 +822,7 @@ impl Operations {
     pub fn bump_check<T: StepperOperations>(
         &self,
         stepper_index: Option<usize>,
-        positions: &[i32],
+        positions: &mut [i32],
         max_positions: &HashMap<usize, i32>,
         stepper_ops: &mut T,
         exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
@@ -787,6 +873,13 @@ impl Operations {
             return Ok("Z-Calibration requires GPIO".to_string());
         }
         
+        // Temporarily disable bump_check (like surfer.py does)
+        let original_bump_check = self.get_bump_check_enable();
+        self.set_bump_check_enable(false);
+        
+        // Get z_rest timing for moves
+        let z_rest_ms = (self.get_z_rest() * 1000.0) as u64;
+        
         let z_indices = self.get_z_stepper_indices();
         let enabled_states = self.get_all_stepper_enabled();
         let z_down_step = self.get_z_down_step();
@@ -800,6 +893,8 @@ impl Operations {
             if let Some(exit) = exit_flag {
                 if exit.load(std::sync::atomic::Ordering::Relaxed) {
                     messages.push("Calibration cancelled".to_string());
+                    // Restore bump_check state before returning
+                    self.set_bump_check_enable(original_bump_check);
                     return Ok(messages.join("\n"));
                 }
             }
@@ -812,13 +907,15 @@ impl Operations {
             
             let gpio_index = stepper_idx.saturating_sub(self.z_first_index);
             let max_pos = max_positions.get(&stepper_idx).copied().unwrap_or(100);
+            let min_pos = 0; // Default min_pos (could be made configurable)
             
-            // Move to max position first to ensure clear of sensor
-            stepper_ops.abs_move(stepper_idx, max_pos)?;
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            // Set position to max_pos without moving (like surfer.py's set_stepper)
+            // This sets the Arduino's internal position counter without physical movement
+            stepper_ops.reset(stepper_idx, max_pos)?;
             
             // Move down until sensor is touched
-            let mut current_pos = max_pos;
+            // Track position locally (like surfer.py's pos_local)
+            let mut pos_local = max_pos;
             let mut touched = false;
             let mut steps_moved = 0;
             
@@ -831,15 +928,24 @@ impl Operations {
                     }
                 }
                 
-                // Check if we've hit minimum position
-                if current_pos <= 0 {
-                    messages.push(format!("Stepper {} bottomed out during calibration", stepper_idx));
+                // Check if we've hit minimum position (like surfer.py checks pos_local <= z_step.min_pos)
+                if pos_local <= min_pos {
+                    messages.push(format!("Stepper {} bottomed out during calibration (reached min_pos {} without touching) - disabling and setting to max_pos {}", stepper_idx, min_pos, max_pos));
+                    // Disable the stepper since it can't reach the sensor
+                    self.set_stepper_enabled(stepper_idx, false);
+                    stepper_ops.disable(stepper_idx)?;
+                    // Set to max_pos (not 0) since it started at max_pos
+                    stepper_ops.reset(stepper_idx, max_pos)?;
+                    if let Some(pos) = positions.get_mut(stepper_idx) {
+                        *pos = max_pos;
+                    }
                     break;
                 }
                 
                 // Check sensor
                 match gpio.press_check(Some(gpio_index)) {
                     Ok(states) => {
+                        // When button_index is Some, press_check returns Vec with one element at index 0
                         if let Some(&is_touching) = states.get(0) {
                             if is_touching {
                                 touched = true;
@@ -853,15 +959,17 @@ impl Operations {
                     }
                 }
                 
-                // Move down
+                // Move down (like surfer.py's rmove with down_step)
                 stepper_ops.rel_move(stepper_idx, z_down_step)?;
-                current_pos += z_down_step;
+                pos_local += z_down_step; // Update local position tracker
                 steps_moved += z_down_step.abs();
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                
+                // Wait using z_rest timing (like surfer.py's waiter(config.ins.z_rest))
+                std::thread::sleep(std::time::Duration::from_millis(z_rest_ms));
             }
             
             if touched {
-                // Reset to 0
+                // Reset to 0 (like surfer.py's set_stepper to 0)
                 stepper_ops.reset(stepper_idx, 0)?;
                 if let Some(pos) = positions.get_mut(stepper_idx) {
                     *pos = 0;
@@ -872,7 +980,68 @@ impl Operations {
             }
         }
         
-        messages.push("Z calibration complete".to_string());
+        messages.push("Z calibration complete - all enabled steppers moved until touching or disabled".to_string());
+        
+        // Call bump_check to handle any steppers still touching after calibration
+        messages.push("Running bump_check to clear any steppers still touching...".to_string());
+        let mut max_positions_map = std::collections::HashMap::new();
+        for &stepper_idx in &z_indices {
+            max_positions_map.insert(stepper_idx, max_positions.get(&stepper_idx).copied().unwrap_or(100));
+        }
+        
+        // Call bump_check repeatedly until no enabled steppers are touching
+        let mut iterations = 0;
+        const MAX_BUMP_CHECK_ITERATIONS: u32 = 10; // Safety limit
+        loop {
+            if iterations >= MAX_BUMP_CHECK_ITERATIONS {
+                messages.push("Bump check reached max iterations - stopping".to_string());
+                break;
+            }
+            
+            let bump_result = self.bump_check(
+                None, // Check all steppers
+                positions,
+                &max_positions_map,
+                stepper_ops,
+                exit_flag,
+            )?;
+            
+            // Check if any enabled steppers are still touching
+            let mut any_touching = false;
+            let current_enabled_states = self.get_all_stepper_enabled();
+            for &stepper_idx in &z_indices {
+                let enabled = current_enabled_states.get(&stepper_idx).copied().unwrap_or(false);
+                if enabled {
+                    let gpio_index = stepper_idx.saturating_sub(self.z_first_index);
+                    match gpio.press_check(Some(gpio_index)) {
+                        Ok(states) => {
+                            if let Some(&is_touching) = states.get(0) {
+                                if is_touching {
+                                    any_touching = true;
+                                    break;
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+            
+            if !any_touching {
+                messages.push("All enabled steppers cleared - bump_check complete".to_string());
+                break;
+            }
+            
+            iterations += 1;
+            messages.push(format!("Bump check iteration {} - still clearing steppers", iterations));
+        }
+        
+        // Re-enable bump_check if it was previously enabled
+        self.set_bump_check_enable(original_bump_check);
+        if original_bump_check {
+            messages.push("Bump check re-enabled".to_string());
+        }
+        
         Ok(messages.join("\n"))
     }
     

@@ -251,6 +251,40 @@ impl eframe::App for OperationsGUI {
         let partials = get_results::read_partials_from_slot(&self.partials_slot);
         self.operations.update_audio_analysis_with_partials(partials);
         
+        // Call bump_check if enabled (after audio analysis update)
+        if self.operations.get_bump_check_enable() {
+            if let Some(ref mut stepper_ops) = self.arduino_ops {
+                // Get current positions
+                let z_indices = self.operations.get_z_stepper_indices();
+                let max_idx = z_indices.iter().max().copied().unwrap_or(0);
+                let mut positions = vec![0i32; max_idx + 1];
+                for &idx in &z_indices {
+                    positions[idx] = self.stepper_positions.get(&idx).copied().unwrap_or(0);
+                }
+                
+                // Build max_positions map
+                let mut max_positions = std::collections::HashMap::new();
+                for &idx in &z_indices {
+                    max_positions.insert(idx, 100); // Default max position
+                }
+                
+                // Call bump_check (it will actively move steppers up if touching)
+                let _bump_msg = self.operations.bump_check(
+                    None, // Check all steppers
+                    &mut positions,
+                    &max_positions,
+                    stepper_ops,
+                    None, // No exit flag
+                );
+                // Update tracked positions after bump_check (it may have moved steppers)
+                for &idx in &z_indices {
+                    if idx < positions.len() {
+                        self.stepper_positions.insert(idx, positions[idx]);
+                    }
+                }
+            }
+        }
+        
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Operations Control");
             
