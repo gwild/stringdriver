@@ -738,20 +738,18 @@ impl Operations {
                     continue;
                 }
 
-                // Actively move up by z_up_step until not touching
-                let mut still_touching = true;
-                let mut moved_up = false;
-                let mut move_iterations = 0;
-                const MAX_MOVE_ITERATIONS: u32 = 50; // Safety limit to prevent infinite loops
-                const MIN_POS: i32 = 0; // Minimum position
-                while still_touching {
-                    move_iterations += 1;
-                    if move_iterations > MAX_MOVE_ITERATIONS {
+                // Move stepper UP by z_up_step until not touching sensor
+                // CRITICAL: bump_check ONLY moves UP (away from sensor), never down
+                const MAX_MOVE_ITERATIONS: u32 = 50;
+                let mut iterations = 0;
+                
+                loop {
+                    iterations += 1;
+                    if iterations > MAX_MOVE_ITERATIONS {
                         messages.push(format!(
-                            "\nCRITICAL: Stepper {} exceeded max move iterations ({}). Disabling to prevent damage.",
+                            "\nCRITICAL: Stepper {} exceeded {} iterations - disabling",
                             stepper_idx, MAX_MOVE_ITERATIONS
                         ));
-                        stepper_ops.reset(stepper_idx, 0)?;
                         stepper_ops.disable(stepper_idx)?;
                         if let Ok(mut counts) = bump_retry_counts.lock() {
                             counts.insert(stepper_idx, 0);
@@ -759,141 +757,65 @@ impl Operations {
                         break;
                     }
                     
-                    // Check current position before moving
-                    let current_pos_before = if stepper_idx < positions.len() {
-                        positions[stepper_idx]
-                    } else {
-                        0
-                    };
+                    // Get current position
+                    let current_pos = positions.get(stepper_idx).copied().unwrap_or(0);
                     
-                    // Check if moving would exceed max_pos (moving up/positive)
-                    if z_up_step > 0 {
-                        if current_pos_before >= max_pos {
-                            messages.push(format!(
-                                "\nCRITICAL: Stepper {} at max_pos {} - cannot move up. Disabling.",
-                                stepper_idx, max_pos
-                            ));
-                            stepper_ops.reset(stepper_idx, 0)?;
-                            stepper_ops.disable(stepper_idx)?;
-                            if let Ok(mut counts) = bump_retry_counts.lock() {
-                                counts.insert(stepper_idx, 0);
-                            }
-                            break;
+                    // Check limits before moving
+                    if current_pos >= max_pos {
+                        messages.push(format!(
+                            "\nCRITICAL: Stepper {} at max_pos {} - disabling",
+                            stepper_idx, max_pos
+                        ));
+                        stepper_ops.disable(stepper_idx)?;
+                        if let Ok(mut counts) = bump_retry_counts.lock() {
+                            counts.insert(stepper_idx, 0);
                         }
-                        if current_pos_before + z_up_step > max_pos {
-                            messages.push(format!(
-                                "\nCRITICAL: Stepper {} would exceed max_pos {} if moved. Stopping at max_pos.",
-                                stepper_idx, max_pos
-                            ));
-                            stepper_ops.reset(stepper_idx, max_pos)?;
-                            if let Some(pos) = positions.get_mut(stepper_idx) {
-                                *pos = max_pos;
-                            }
-                            stepper_ops.disable(stepper_idx)?;
-                            if let Ok(mut counts) = bump_retry_counts.lock() {
-                                counts.insert(stepper_idx, 0);
-                            }
-                            break;
-                        }
+                        break;
                     }
                     
-                    // Check if moving would exceed min_pos (moving down/negative)
-                    if z_up_step < 0 {
-                        if current_pos_before <= MIN_POS {
-                            messages.push(format!(
-                                "\nCRITICAL: Stepper {} at min_pos {} - cannot move down. Disabling.",
-                                stepper_idx, MIN_POS
-                            ));
-                            stepper_ops.reset(stepper_idx, 0)?;
-                            stepper_ops.disable(stepper_idx)?;
-                            if let Ok(mut counts) = bump_retry_counts.lock() {
-                                counts.insert(stepper_idx, 0);
-                            }
-                            break;
+                    if current_pos > bump_disable_threshold {
+                        messages.push(format!(
+                            "\nCRITICAL: Stepper {} at position {} (> {}) - disabling",
+                            stepper_idx, current_pos, bump_disable_threshold
+                        ));
+                        stepper_ops.disable(stepper_idx)?;
+                        if let Ok(mut counts) = bump_retry_counts.lock() {
+                            counts.insert(stepper_idx, 0);
                         }
-                        if current_pos_before + z_up_step < MIN_POS {
-                            messages.push(format!(
-                                "\nCRITICAL: Stepper {} would exceed min_pos {} if moved. Stopping at min_pos.",
-                                stepper_idx, MIN_POS
-                            ));
-                            stepper_ops.reset(stepper_idx, MIN_POS)?;
-                            if let Some(pos) = positions.get_mut(stepper_idx) {
-                                *pos = MIN_POS;
-                            }
-                            stepper_ops.disable(stepper_idx)?;
-                            if let Ok(mut counts) = bump_retry_counts.lock() {
-                                counts.insert(stepper_idx, 0);
-                            }
-                            break;
-                        }
+                        break;
                     }
                     
-                    // Move up by z_up_step
+                    // Move UP by z_up_step (positive value moves UP away from sensor)
                     stepper_ops.rel_move(stepper_idx, z_up_step)?;
-                    moved_up = true;
                     if let Some(pos) = positions.get_mut(stepper_idx) {
                         *pos += z_up_step;
                     }
                     
-                    // Wait a bit for the move to complete
+                    // Wait for move to complete
                     std::thread::sleep(std::time::Duration::from_millis(100));
                     
-                    // Check if still touching
+                    // Check if still touching sensor
                     match gpio.press_check(Some(gpio_index)) {
                         Ok(states) => {
                             if let Some(&is_touching) = states.get(0) {
-                                still_touching = is_touching;
                                 if !is_touching {
-                                    // Not touching anymore - reset to z_up_step position
-                                    stepper_ops.reset(stepper_idx, z_up_step)?;
-                                    if let Some(pos) = positions.get_mut(stepper_idx) {
-                                        *pos = z_up_step;
-                                    }
+                                    // No longer touching - success
                                     messages.push(format!(
-                                        "\nStepper {} cleared - moved up and reset to position {} (z_up_step).",
-                                        stepper_idx, z_up_step
+                                        "\nStepper {} cleared - moved up {} steps",
+                                        stepper_idx, z_up_step * iterations
                                     ));
+                                    break;
                                 }
                             } else {
-                                // No state - assume cleared
-                                still_touching = false;
-                                stepper_ops.reset(stepper_idx, z_up_step)?;
-                                if let Some(pos) = positions.get_mut(stepper_idx) {
-                                    *pos = z_up_step;
-                                }
+                                // No sensor reading - assume cleared
+                                break;
                             }
                         }
                         Err(e) => {
-                            messages.push(format!("GPIO error checking stepper {}: {}", stepper_idx, e));
+                            messages.push(format!("GPIO error for stepper {}: {}", stepper_idx, e));
                             break;
                         }
                     }
-                    
-                    // Safety check - if we've moved up a lot and still touching, break
-                    let current_pos_check = if stepper_idx < positions.len() {
-                        positions[stepper_idx]
-                    } else {
-                        0
-                    };
-                    if current_pos_check > bump_disable_threshold {
-                        messages.push(format!(
-                            "\nStepper {} still touching after multiple moves - disabling",
-                            stepper_idx
-                        ));
-                        stepper_ops.reset(stepper_idx, 0)?;
-                        stepper_ops.disable(stepper_idx)?;
-                        if let Ok(mut counts) = bump_retry_counts.lock() {
-                            counts.insert(stepper_idx, 0);
-                        }
-                        break;
-                    }
-                }
-                
-                if moved_up && still_touching {
-                    messages.push(format!(
-                        "\nStepper {} bumping - moved up {} (z_up_step).",
-                        stepper_idx, z_up_step
-                    ));
                 }
             }
         }

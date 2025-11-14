@@ -691,10 +691,17 @@ fn main() {
     };
     
     println!("Initializing GUI window...");
+    // Position in top right: assume screen width ~1920, window width 420
+    // Position at x = screen_width - window_width - margin
+    let window_width = 420.0;
+    let screen_width = 1920.0; // Default, will be adjusted by window manager if needed
+    let top_right_x = screen_width - window_width - 20.0; // 20px margin from right edge
+    
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Operations Control")
-            .with_inner_size([420.0, 1200.0]),
+            .with_inner_size([window_width, 1200.0])
+            .with_position(egui::pos2(top_right_x, 0.0)), // Top right
         ..Default::default()
     };
     

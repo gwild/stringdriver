@@ -222,7 +222,11 @@ impl StepperGUI {
                         let app_clone = Arc::clone(&app);
                         thread::spawn(move || {
                             let mut buffer = [0u8; 1024];
-                            match stream.read(&mut buffer) {
+                            let result = stream.read(&mut buffer);
+                            // Explicitly drop stream to close file descriptor
+                            drop(stream);
+                            
+                            match result {
                                 Ok(n) if n > 0 => {
                                     if let Ok(cmd) = String::from_utf8(buffer[..n].to_vec()) {
                                         if let Ok(mut guard) = app_clone.lock() {
@@ -239,6 +243,11 @@ impl StepperGUI {
                     }
                     Err(e) => {
                         eprintln!("Socket accept error: {}", e);
+                        // If we're getting too many errors, break to prevent infinite loop
+                        if e.raw_os_error() == Some(24) {
+                            eprintln!("Too many open files - breaking accept loop");
+                            break;
+                        }
                     }
                 }
             }
@@ -1344,7 +1353,8 @@ fn main() {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 800.0]), // Tall narrow window
+            .with_inner_size([400.0, 800.0]) // Tall narrow window
+            .with_position(egui::pos2(0.0, 0.0)), // Left side of screen
         ..Default::default()
     };
     let _ = eframe::run_native(
