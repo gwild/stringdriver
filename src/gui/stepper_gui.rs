@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::process::Command;
 use gethostname::gethostname;
 use egui::Color32;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex};
 use std::path::Path;
 
@@ -218,25 +218,28 @@ impl StepperGUI {
             
             for stream in listener.incoming() {
                 match stream {
-                    Ok(mut stream) => {
+                    Ok(stream) => {
                         let app_clone = Arc::clone(&app);
                         thread::spawn(move || {
-                            let mut buffer = [0u8; 1024];
-                            let result = stream.read(&mut buffer);
-                            // Explicitly drop stream to close file descriptor
-                            drop(stream);
-                            
-                            match result {
-                                Ok(n) if n > 0 => {
-                                    if let Ok(cmd) = String::from_utf8(buffer[..n].to_vec()) {
+                            use std::io::{BufRead, BufReader};
+                            let mut reader = BufReader::new(stream);
+                            loop {
+                                let mut cmd = String::new();
+                                match reader.read_line(&mut cmd) {
+                                    Ok(0) => break, // EOF
+                                    Ok(_) => {
+                                        let trimmed = cmd.trim();
+                                        if trimmed.is_empty() {
+                                            continue;
+                                        }
                                         if let Ok(mut guard) = app_clone.lock() {
-                                            guard.handle_command(&cmd);
+                                            guard.handle_command(trimmed);
                                         }
                                     }
-                                }
-                                Ok(_) => {}
-                                Err(e) => {
-                                    eprintln!("Socket read error: {}", e);
+                                    Err(e) => {
+                                        eprintln!("Socket read error: {}", e);
+                                        break;
+                                    }
                                 }
                             }
                         });

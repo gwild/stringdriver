@@ -16,6 +16,7 @@ use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use std::os::unix::net::UnixStream;
 
 /// Type alias for partials slot (matches partials_slot::PartialsSlot pattern)
 /// Using get_results::PartialsData type
@@ -25,6 +26,7 @@ type PartialsSlot = Arc<Mutex<Option<get_results::PartialsData>>>;
 /// Sends commands like "rel_move 2 2\n" to stepper_gui's Unix socket listener
 struct ArduinoStepperOps {
     socket_path: String,
+    stream: Option<UnixStream>,
 }
 
 impl ArduinoStepperOps {
@@ -32,24 +34,41 @@ impl ArduinoStepperOps {
         // Generate socket path the same way as stepper_gui.rs
         let port_id = port_path.replace("/", "_").replace("\\", "_");
         let socket_path = format!("/tmp/stepper_gui_{}.sock", port_id);
-        Self { socket_path }
+        Self { socket_path, stream: None }
+    }
+    
+    fn ensure_stream(&mut self) -> Result<&mut UnixStream> {
+        if self.stream.is_none() {
+            let stream = UnixStream::connect(&self.socket_path)
+                .map_err(|e| anyhow::anyhow!("Failed to connect to stepper_gui socket at {}: {}", self.socket_path, e))?;
+            self.stream = Some(stream);
+        }
+        Ok(self.stream.as_mut().unwrap())
     }
     
     /// Send a text command to stepper_gui via Unix socket
-    fn send_command(&self, cmd: &str) -> Result<()> {
-        use std::os::unix::net::UnixStream;
+    fn send_command(&mut self, cmd: &str) -> Result<()> {
         use std::io::Write;
         
-        let mut stream = UnixStream::connect(&self.socket_path)
-            .map_err(|e| anyhow::anyhow!("Failed to connect to stepper_gui socket at {}: {}", self.socket_path, e))?;
-        
         let cmd_with_newline = format!("{}\n", cmd);
-        stream.write_all(cmd_with_newline.as_bytes())
-            .map_err(|e| anyhow::anyhow!("Failed to write command to socket: {}", e))?;
-        stream.flush()
-            .map_err(|e| anyhow::anyhow!("Failed to flush socket: {}", e))?;
-        
-        Ok(())
+        match self.ensure_stream() {
+            Ok(stream) => {
+                if let Err(e) = stream.write_all(cmd_with_newline.as_bytes()) {
+                    // Connection probably dropped; try once more by reconnecting.
+                    self.stream = None;
+                    let stream = self.ensure_stream()?;
+                    stream.write_all(cmd_with_newline.as_bytes())
+                        .map_err(|e| anyhow::anyhow!("Failed to write command to socket: {}", e))?;
+                    stream.flush()
+                        .map_err(|e| anyhow::anyhow!("Failed to flush socket: {}", e))?;
+                    Ok(())
+                } else {
+                    stream.flush()
+                        .map_err(|e| anyhow::anyhow!("Failed to flush socket: {}", e))
+                }
+            }
+            Err(e) => Err(e),
+        }
     }
     
     /// Read current positions from stepper_gui (not implemented - positions tracked locally)

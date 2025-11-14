@@ -109,9 +109,9 @@ impl Operations {
         let z_down_step = ops_settings.z_down_step.unwrap_or(-2);
         
         // Load rest values from operations settings (from YAML - defaults from surfer.py)
-        let tune_rest = ops_settings.tune_rest.unwrap_or(10.0);
-        let x_rest = ops_settings.x_rest.unwrap_or(10.0);
-        let z_rest = ops_settings.z_rest.unwrap_or(5.0);
+        let tune_rest = ops_settings.tune_rest.unwrap_or(5.0);
+        let x_rest = ops_settings.x_rest.unwrap_or(5.0);
+        let z_rest = ops_settings.z_rest.unwrap_or(1.0);
         let lap_rest = ops_settings.lap_rest.unwrap_or(4.0);
         
         // Load adjustment parameters from operations settings (from YAML - defaults from surfer.py)
