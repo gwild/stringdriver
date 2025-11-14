@@ -114,8 +114,6 @@ pub struct OperationsSettings {
     pub z_up_step: Option<i32>,
     pub z_down_step: Option<i32>,
     pub bump_check_enable: bool,
-    pub bump_check_repeat: u32,
-    pub bump_disable_threshold: i32,
     pub tune_rest: Option<f32>,
     pub x_rest: Option<f32>,
     pub z_rest: Option<f32>,
@@ -162,16 +160,6 @@ pub fn load_operations_settings(hostname: &str) -> Result<OperationsSettings> {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let bump_check_repeat = host_block.get(&serde_yaml::Value::from("BUMP_CHECK_REPEAT"))
-        .and_then(|v| v.as_i64())
-        .map(|v| v as u32)
-        .unwrap_or(10);
-
-    let bump_disable_threshold = host_block.get(&serde_yaml::Value::from("BUMP_DISABLE_THRESHOLD"))
-        .and_then(|v| v.as_i64())
-        .map(|v| v as i32)
-        .unwrap_or(3);
-
     let tune_rest = host_block.get(&serde_yaml::Value::from("TUNE_REST"))
         .and_then(|v| v.as_f64())
         .map(|v| v as f32);
@@ -208,8 +196,6 @@ pub fn load_operations_settings(hostname: &str) -> Result<OperationsSettings> {
         z_up_step,
         z_down_step,
         bump_check_enable,
-        bump_check_repeat,
-        bump_disable_threshold,
         tune_rest,
         x_rest,
         z_rest,

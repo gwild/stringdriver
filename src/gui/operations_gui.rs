@@ -300,34 +300,6 @@ impl eframe::App for OperationsGUI {
             
             ui.separator();
             
-            // Bump check repeat spinbox
-            ui.horizontal(|ui| {
-                ui.label("Bump Check Repeat:");
-                let mut repeat = self.operations.get_bump_check_repeat() as i32;
-                let mut drag = egui::DragValue::new(&mut repeat);
-                drag = drag.clamp_range(1..=100);
-                if ui.add(drag).changed() {
-                    self.operations.set_bump_check_repeat(repeat as u32);
-                    self.append_message(&format!("Bump check repeat set to {}", repeat));
-                }
-            });
-            
-            ui.separator();
-            
-            // Bump disable threshold spinbox
-            ui.horizontal(|ui| {
-                ui.label("Bump Disable Threshold:");
-                let mut threshold = self.operations.get_bump_disable_threshold();
-                let mut drag = egui::DragValue::new(&mut threshold);
-                drag = drag.clamp_range(1..=100);
-                if ui.add(drag).changed() {
-                    self.operations.set_bump_disable_threshold(threshold);
-                    self.append_message(&format!("Bump disable threshold set to {}", threshold));
-                }
-            });
-            
-            ui.separator();
-            
             // Adjustment parameters
             ui.heading("Adjustment Parameters");
             

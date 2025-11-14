@@ -1287,8 +1287,6 @@ fn main() {
                 z_up_step: Some(2),
                 z_down_step: Some(-2),
                 bump_check_enable: false,
-                bump_check_repeat: 1,
-                bump_disable_threshold: 0,
                 tune_rest: Some(10.0),
                 x_rest: Some(10.0),
                 z_rest: Some(5.0),
