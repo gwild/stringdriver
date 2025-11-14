@@ -263,10 +263,20 @@ impl Operations {
         Self::sleep_for(self.get_lap_rest());
     }
 
-    fn rel_move_z<T: StepperOperations>(&self, stepper_ops: &mut T, stepper: usize, delta: i32) -> Result<()> {
+    fn rel_move_z_with_rest<T: StepperOperations>(&self, stepper_ops: &mut T, stepper: usize, delta: i32, rest: bool) -> Result<()> {
         stepper_ops.rel_move(stepper, delta)?;
-        self.rest_z();
+        if rest {
+            self.rest_z();
+        }
         Ok(())
+    }
+
+    fn rel_move_z<T: StepperOperations>(&self, stepper_ops: &mut T, stepper: usize, delta: i32) -> Result<()> {
+        self.rel_move_z_with_rest(stepper_ops, stepper, delta, true)
+    }
+
+    fn rel_move_z_no_rest<T: StepperOperations>(&self, stepper_ops: &mut T, stepper: usize, delta: i32) -> Result<()> {
+        self.rel_move_z_with_rest(stepper_ops, stepper, delta, false)
     }
 
     fn rel_move_x<T: StepperOperations>(&self, stepper_ops: &mut T, stepper: usize, delta: i32) -> Result<()> {
@@ -600,6 +610,7 @@ impl Operations {
         };
 
         let enabled_states = self.get_all_stepper_enabled();
+        const MAX_MOVE_ITERATIONS: u32 = 50;
         let mut messages = Vec::new();
 
         for &stepper_idx in &steppers_to_check {
@@ -617,6 +628,7 @@ impl Operations {
             let gpio_index = stepper_idx.saturating_sub(self.z_first_index);
             let max_pos = max_positions.get(&stepper_idx).copied().unwrap_or(100);
             let mut cleared = false;
+            let mut iterations = 0u32;
 
             loop {
                 if let Some(exit) = exit_flag {
@@ -650,9 +662,34 @@ impl Operations {
 
                 let remaining = max_pos - current_pos;
                 let move_delta = remaining.min(z_up_step);
-                self.rel_move_z(stepper_ops, stepper_idx, move_delta)?;
+                self.rel_move_z_no_rest(stepper_ops, stepper_idx, move_delta)?;
                 if let Some(pos) = positions.get_mut(stepper_idx) {
                     *pos += move_delta;
+                }
+
+                let still_bumping = match gpio.press_check(Some(gpio_index)) {
+                    Ok(states) => states.get(0).copied().unwrap_or(false),
+                    Err(e) => {
+                        messages.push(format!("GPIO error for stepper {}: {}", stepper_idx, e));
+                        false
+                    }
+                };
+
+                if !still_bumping {
+                    cleared = true;
+                    break;
+                }
+
+                self.rest_z();
+
+                iterations += 1;
+                if iterations >= MAX_MOVE_ITERATIONS {
+                    stepper_ops.disable(stepper_idx)?;
+                    messages.push(format!(
+                        "\nCRITICAL: Stepper {} exceeded {} move attempts while bumping - disabling.",
+                        stepper_idx, MAX_MOVE_ITERATIONS
+                    ));
+                    break;
                 }
             }
 
