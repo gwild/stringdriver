@@ -15,7 +15,7 @@ use eframe::egui;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Type alias for partials slot (matches partials_slot::PartialsSlot pattern)
 /// Using get_results::PartialsData type
@@ -87,6 +87,7 @@ struct OperationsGUI {
     partials_slot: PartialsSlot,
     selected_operation: String,
     arduino_ops: Option<ArduinoStepperOps>,
+    last_bump_check: Instant,
     // Thresholds for z_adjust operation
     voice_count_min: Vec<i32>,  // Per-channel minimum voice count
     voice_count_max: Vec<i32>,  // Per-channel maximum voice count
@@ -141,6 +142,7 @@ impl OperationsGUI {
             partials_slot,
             selected_operation: "None".to_string(),
             arduino_ops: Some(arduino_ops),
+            last_bump_check: Instant::now() - Duration::from_secs(1),
             voice_count_min: vec![2; string_num],
             voice_count_max: vec![12; string_num],
             amp_sum_min: vec![20; string_num],
@@ -253,6 +255,8 @@ impl eframe::App for OperationsGUI {
         
         // Call bump_check if enabled (after audio analysis update)
         if self.operations.get_bump_check_enable() {
+            let now = Instant::now();
+            if now.duration_since(self.last_bump_check) >= Duration::from_secs(1) {
             if let Some(ref mut stepper_ops) = self.arduino_ops {
                 // Get current positions
                 let z_indices = self.operations.get_z_stepper_indices();
@@ -282,6 +286,8 @@ impl eframe::App for OperationsGUI {
                         self.stepper_positions.insert(idx, positions[idx]);
                     }
                 }
+                self.last_bump_check = now;
+            }
             }
         }
         

@@ -579,27 +579,27 @@ impl Operations {
 
             let gpio_index = stepper_idx.saturating_sub(z_first_index);
             let max_pos = max_positions.get(&stepper_idx).copied().unwrap_or(100);
-            let mut iterations = 0u32;
             let mut cleared = false;
 
-            loop {
+            let is_bumping = match gpio.press_check(Some(gpio_index)) {
+                Ok(states) => states.get(0).copied().unwrap_or(false),
+                Err(e) => {
+                    messages.push(format!("GPIO error for stepper {}: {}", stepper_idx, e));
+                    false
+                }
+            };
+
+            if !is_bumping {
+                continue;
+            }
+
+            let mut iterations = 0u32;
+
+            while iterations < MAX_MOVE_ITERATIONS {
                 if let Some(exit) = exit_flag {
                     if exit.load(std::sync::atomic::Ordering::Relaxed) {
                         return Ok(messages.join("\n"));
                     }
-                }
-
-                let is_bumping = match gpio.press_check(Some(gpio_index)) {
-                    Ok(states) => states.get(0).copied().unwrap_or(false),
-                    Err(e) => {
-                        messages.push(format!("GPIO error for stepper {}: {}", stepper_idx, e));
-                        false
-                    }
-                };
-
-                if !is_bumping {
-                    cleared = true;
-                    break;
                 }
 
                 let current_pos = positions.get(stepper_idx).copied().unwrap_or(0);
@@ -612,16 +612,6 @@ impl Operations {
                     break;
                 }
 
-                iterations += 1;
-                if iterations > MAX_MOVE_ITERATIONS {
-                    stepper_ops.disable(stepper_idx)?;
-                    messages.push(format!(
-                        "\nCRITICAL: Stepper {} exceeded {} move attempts while bumping - disabling.",
-                        stepper_idx, MAX_MOVE_ITERATIONS
-                    ));
-                    break;
-                }
-
                 let remaining = max_pos - current_pos;
                 let move_delta = remaining.min(z_up_step);
                 stepper_ops.rel_move(stepper_idx, move_delta)?;
@@ -630,6 +620,29 @@ impl Operations {
                 }
 
                 std::thread::sleep(std::time::Duration::from_millis(100));
+
+                match gpio.press_check(Some(gpio_index)) {
+                    Ok(states) => {
+                        if let Some(false) = states.get(0) {
+                            cleared = true;
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        messages.push(format!("GPIO error for stepper {}: {}", stepper_idx, e));
+                        break;
+                    }
+                }
+
+                iterations += 1;
+            }
+
+            if iterations >= MAX_MOVE_ITERATIONS {
+                stepper_ops.disable(stepper_idx)?;
+                messages.push(format!(
+                    "\nCRITICAL: Stepper {} exceeded {} move attempts while bumping - disabling.",
+                    stepper_idx, MAX_MOVE_ITERATIONS
+                ));
             }
 
             if cleared {
