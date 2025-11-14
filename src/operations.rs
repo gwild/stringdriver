@@ -741,7 +741,93 @@ impl Operations {
                 // Actively move up by z_up_step until not touching
                 let mut still_touching = true;
                 let mut moved_up = false;
+                let mut move_iterations = 0;
+                const MAX_MOVE_ITERATIONS: u32 = 50; // Safety limit to prevent infinite loops
+                const MIN_POS: i32 = 0; // Minimum position
                 while still_touching {
+                    move_iterations += 1;
+                    if move_iterations > MAX_MOVE_ITERATIONS {
+                        messages.push(format!(
+                            "\nCRITICAL: Stepper {} exceeded max move iterations ({}). Disabling to prevent damage.",
+                            stepper_idx, MAX_MOVE_ITERATIONS
+                        ));
+                        stepper_ops.reset(stepper_idx, 0)?;
+                        stepper_ops.disable(stepper_idx)?;
+                        if let Ok(mut counts) = bump_retry_counts.lock() {
+                            counts.insert(stepper_idx, 0);
+                        }
+                        break;
+                    }
+                    
+                    // Check current position before moving
+                    let current_pos_before = if stepper_idx < positions.len() {
+                        positions[stepper_idx]
+                    } else {
+                        0
+                    };
+                    
+                    // Check if moving would exceed max_pos (moving up/positive)
+                    if z_up_step > 0 {
+                        if current_pos_before >= max_pos {
+                            messages.push(format!(
+                                "\nCRITICAL: Stepper {} at max_pos {} - cannot move up. Disabling.",
+                                stepper_idx, max_pos
+                            ));
+                            stepper_ops.reset(stepper_idx, 0)?;
+                            stepper_ops.disable(stepper_idx)?;
+                            if let Ok(mut counts) = bump_retry_counts.lock() {
+                                counts.insert(stepper_idx, 0);
+                            }
+                            break;
+                        }
+                        if current_pos_before + z_up_step > max_pos {
+                            messages.push(format!(
+                                "\nCRITICAL: Stepper {} would exceed max_pos {} if moved. Stopping at max_pos.",
+                                stepper_idx, max_pos
+                            ));
+                            stepper_ops.reset(stepper_idx, max_pos)?;
+                            if let Some(pos) = positions.get_mut(stepper_idx) {
+                                *pos = max_pos;
+                            }
+                            stepper_ops.disable(stepper_idx)?;
+                            if let Ok(mut counts) = bump_retry_counts.lock() {
+                                counts.insert(stepper_idx, 0);
+                            }
+                            break;
+                        }
+                    }
+                    
+                    // Check if moving would exceed min_pos (moving down/negative)
+                    if z_up_step < 0 {
+                        if current_pos_before <= MIN_POS {
+                            messages.push(format!(
+                                "\nCRITICAL: Stepper {} at min_pos {} - cannot move down. Disabling.",
+                                stepper_idx, MIN_POS
+                            ));
+                            stepper_ops.reset(stepper_idx, 0)?;
+                            stepper_ops.disable(stepper_idx)?;
+                            if let Ok(mut counts) = bump_retry_counts.lock() {
+                                counts.insert(stepper_idx, 0);
+                            }
+                            break;
+                        }
+                        if current_pos_before + z_up_step < MIN_POS {
+                            messages.push(format!(
+                                "\nCRITICAL: Stepper {} would exceed min_pos {} if moved. Stopping at min_pos.",
+                                stepper_idx, MIN_POS
+                            ));
+                            stepper_ops.reset(stepper_idx, MIN_POS)?;
+                            if let Some(pos) = positions.get_mut(stepper_idx) {
+                                *pos = MIN_POS;
+                            }
+                            stepper_ops.disable(stepper_idx)?;
+                            if let Ok(mut counts) = bump_retry_counts.lock() {
+                                counts.insert(stepper_idx, 0);
+                            }
+                            break;
+                        }
+                    }
+                    
                     // Move up by z_up_step
                     stepper_ops.rel_move(stepper_idx, z_up_step)?;
                     moved_up = true;
