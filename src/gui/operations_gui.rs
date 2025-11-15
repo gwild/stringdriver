@@ -176,7 +176,7 @@ impl OperationsGUI {
         let logger = config_loader::DbSettings::from_env()
             .ok()
             .and_then(|db_config| {
-                machine_state_logger::MachineStateLoggingContext::new_nonblocking(db_config).into()
+                Some(machine_state_logger::MachineStateLoggingContext::new_nonblocking(db_config))
             });
         
         // Start 1Hz logging thread if logger available
