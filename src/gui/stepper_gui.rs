@@ -170,8 +170,8 @@ impl StepperGUI {
             "reset" => {
                 if parts.len() == 3 {
                     if let (Ok(stepper), Ok(position)) = (parts[1].parse::<usize>(), parts[2].parse::<i32>()) {
-                        self.log(&format!("IPC: reset {} {}", stepper, position));
-                        self.set_position(stepper, position);
+                        self.log(&format!("IPC: reset {} {} (set_stepper - no physical move)", stepper, position));
+                        self.reset_position(stepper, position);
                     }
                 }
             }
@@ -493,21 +493,34 @@ impl StepperGUI {
     }
 
     fn set_position(&mut self, stepper: usize, position: i32) {
+        // CRITICAL: This is MODEL ONLY - updates internal position tracking variable
+        // Does NOT send physical move command to Arduino
+        // Real-world position comes from Arduino via refresh_positions() which calibrates the model
+        // This maintains a parallel model that requires periodic calibration to reality
+        let clamped = position.clamp(-100, 100);
+        if stepper < self.positions.len() {
+            self.positions[stepper] = clamped;
+            self.log(&format!(">>> MODEL: Updated internal position for stepper {} to {} (code variable only, no physical move)", stepper, clamped));
+        } else {
+            self.log(&format!("ERROR: Stepper index {} out of range", stepper));
+        }
+    }
+
+    fn reset_position(&mut self, stepper: usize, position: i32) {
         if self.port.is_none() {
-            self.log(&format!("ERROR: Cannot set position - port not connected"));
+            self.log(&format!("ERROR: Cannot reset position - port not connected"));
             return;
         }
-        // Flush input before command (mirror Python's flush_input_before_command)
+        // Flush input before command
         if let Some(p) = self.port.as_mut() {
             let _ = p.clear(serialport::ClearBuffer::Input);
         }
-        let clamped = position.clamp(-100, 100);
         let s = stepper as i16;
-        self.log(&format!(">>> SETTING stepper {} to {} (amove command)", stepper, clamped));
-        self.send_cmd_bin(2, s, clamped as i32); // amove is command ID 2, format "il"
+        self.log(&format!(">>> RESETTING stepper {} to {} (set_stepper command - no physical move)", stepper, position));
+        self.send_cmd_bin(4, s, position); // set_stepper is command ID 4, format "il" - sets position without moving
         self.log(&format!("Command sent, waiting for Arduino..."));
-        // Arduino move is synchronous - wait for it to complete
-        thread::sleep(Duration::from_millis(500));
+        // set_stepper is fast - just sets internal counter
+        thread::sleep(Duration::from_millis(100));
         self.log(&format!("Refreshing positions..."));
         self.refresh_positions();
     }

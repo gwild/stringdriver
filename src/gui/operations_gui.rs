@@ -116,6 +116,8 @@ struct OperationsGUI {
     stepper_positions: std::collections::HashMap<usize, i32>,
     // Exit flag to signal operations to stop
     exit_flag: Arc<AtomicBool>,
+    // Operation lock to prevent concurrent execution
+    operation_running: Arc<AtomicBool>,
 }
 
 impl OperationsGUI {
@@ -161,6 +163,7 @@ impl OperationsGUI {
             operations,
             message: String::new(),
             exit_flag: Arc::new(AtomicBool::new(false)),
+            operation_running: Arc::new(AtomicBool::new(false)),
             partials_slot,
             selected_operation: "None".to_string(),
             arduino_ops: Some(arduino_ops),
@@ -182,11 +185,20 @@ impl OperationsGUI {
     
     /// Execute the selected operation
     fn execute_operation(&mut self) {
+        // Prevent concurrent operations
+        if self.operation_running.load(std::sync::atomic::Ordering::Relaxed) {
+            self.append_message("Operation already running - please wait");
+            return;
+        }
+        
         // Check if arduino_ops is available first
         if self.arduino_ops.is_none() {
             self.append_message("Arduino connection client not available");
             return;
         }
+        
+        // Set operation running flag
+        self.operation_running.store(true, std::sync::atomic::Ordering::Relaxed);
         
         // Get current positions - use tracked positions, defaulting to 0
         let z_indices = self.operations.get_z_stepper_indices();
@@ -203,7 +215,6 @@ impl OperationsGUI {
         match self.selected_operation.as_str() {
             "z_calibrate" => {
                 self.append_message("Executing Z Calibrate...");
-                // Use scoped block to limit borrow lifetime
                 let result = {
                     let stepper_ops = self.arduino_ops.as_mut().unwrap();
                     self.operations.z_calibrate(
@@ -215,6 +226,12 @@ impl OperationsGUI {
                 };
                 match result {
                     Ok(msg) => {
+                        // Update tracked positions
+                        for &idx in &z_indices {
+                            if idx < positions.len() {
+                                self.stepper_positions.insert(idx, positions[idx]);
+                            }
+                        }
                         self.append_message(&msg);
                     }
                     Err(e) => {
@@ -224,13 +241,11 @@ impl OperationsGUI {
             }
             "z_adjust" => {
                 self.append_message("Executing Z Adjust...");
-                // Use thresholds from GUI
                 let min_thresholds: Vec<f32> = self.amp_sum_min.iter().map(|&v| v as f32).collect();
                 let max_thresholds: Vec<f32> = self.amp_sum_max.iter().map(|&v| v as f32).collect();
                 let min_voices: Vec<usize> = self.voice_count_min.iter().map(|&v| v.max(0) as usize).collect();
                 let max_voices: Vec<usize> = self.voice_count_max.iter().map(|&v| v.max(0) as usize).collect();
                 
-                // Use scoped block to limit borrow lifetime
                 let result = {
                     let stepper_ops = self.arduino_ops.as_mut().unwrap();
                     self.operations.z_adjust(
@@ -247,8 +262,8 @@ impl OperationsGUI {
                     Ok(msg) => {
                         // Update tracked positions after z_adjust (handles negative positions)
                         for &idx in &z_indices {
-                            if let Some(&pos) = positions.get(idx) {
-                                self.stepper_positions.insert(idx, pos);
+                            if idx < positions.len() {
+                                self.stepper_positions.insert(idx, positions[idx]);
                             }
                         }
                         self.append_message(&msg);
@@ -262,6 +277,7 @@ impl OperationsGUI {
                 self.append_message("Executing Bump Check...");
                 if z_indices.is_empty() {
                     self.append_message("No Z steppers configured");
+                    self.operation_running.store(false, std::sync::atomic::Ordering::Relaxed);
                     return;
                 }
                 let result = {
@@ -294,6 +310,9 @@ impl OperationsGUI {
                 self.append_message("No operation selected");
             }
         }
+        
+        // Clear operation running flag
+        self.operation_running.store(false, std::sync::atomic::Ordering::Relaxed);
     }
     
     /// Kill all processes and close GUI
@@ -331,18 +350,38 @@ impl OperationsGUI {
             }
         } else {
             self.append_message(&format!("Kill script not found at: {}", script_path.display()));
-            // Fallback: try pkill directly
+            // Fallback: try pkill directly with SIGKILL (-9) - matching exact patterns from launcher
+            // stepper_gui and operations_gui are launched directly by launcher
             let _ = Command::new("pkill")
-                .args(&["-f", "stepper_gui"])
+                .args(&["-9", "-f", "stepper_gui"])
                 .output();
             let _ = Command::new("pkill")
-                .args(&["-f", "operations_gui"])
+                .args(&["-9", "-f", "operations_gui"])
+                .output();
+            // audio_monitor is launched by persist script at target/release/audio_monitor
+            let _ = Command::new("pkill")
+                .args(&["-9", "-f", "target/release/audio_monitor"])
                 .output();
             let _ = Command::new("pkill")
-                .args(&["-f", "audio_monitor"])
+                .args(&["-9", "-f", "audio_monitor"])
+                .output();
+            // persist script runs in xterm "Persist Monitor"
+            let _ = Command::new("pkill")
+                .args(&["-9", "-f", "Persist Monitor"])
                 .output();
             let _ = Command::new("pkill")
-                .args(&["-f", "audmon"])
+                .args(&["-9", "-f", "audmon.sh"])
+                .output();
+            // qjackctl is checked by persist, may be launched separately
+            let _ = Command::new("pkill")
+                .args(&["-9", "-f", "qjackctl"])
+                .output();
+            let _ = Command::new("pkill")
+                .args(&["-9", "qjackctl"])
+                .output();
+            // launcher
+            let _ = Command::new("pkill")
+                .args(&["-9", "-f", "launcher"])
                 .output();
             self.append_message("Sent kill signals directly");
         }

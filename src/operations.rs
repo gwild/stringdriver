@@ -623,6 +623,22 @@ impl Operations {
 
             let gpio_index = stepper_idx.saturating_sub(self.z_first_index);
             let max_pos = max_positions.get(&stepper_idx).copied().unwrap_or(100);
+            
+            // Check initial bump state
+            let initial_bumping = match gpio.press_check(Some(gpio_index)) {
+                Ok(states) => states.get(0).copied().unwrap_or(false),
+                Err(e) => {
+                    messages.push(format!("GPIO error for stepper {}: {}", stepper_idx, e));
+                    continue; // Skip this stepper on GPIO error
+                }
+            };
+
+            // If not bumping, skip this stepper
+            if !initial_bumping {
+                continue;
+            }
+
+            // Stepper is bumping - move it up until cleared
             let mut cleared = false;
             let mut iterations = 0u32;
 
@@ -631,19 +647,6 @@ impl Operations {
                     if exit.load(std::sync::atomic::Ordering::Relaxed) {
                         return Ok(messages.join("\n"));
                     }
-                }
-
-                let is_bumping = match gpio.press_check(Some(gpio_index)) {
-                    Ok(states) => states.get(0).copied().unwrap_or(false),
-                    Err(e) => {
-                        messages.push(format!("GPIO error for stepper {}: {}", stepper_idx, e));
-                        false
-                    }
-                };
-
-                if !is_bumping {
-                    cleared = true;
-                    break;
                 }
 
                 let current_pos = positions.get(stepper_idx).copied().unwrap_or(0);
@@ -663,11 +666,12 @@ impl Operations {
                     *pos += move_delta;
                 }
 
+                // Check if still bumping after move
                 let still_bumping = match gpio.press_check(Some(gpio_index)) {
                     Ok(states) => states.get(0).copied().unwrap_or(false),
                     Err(e) => {
                         messages.push(format!("GPIO error for stepper {}: {}", stepper_idx, e));
-                        false
+                        false // Assume cleared on error
                     }
                 };
 
@@ -764,12 +768,14 @@ impl Operations {
             // Set position to max_pos without moving (like surfer.py's set_stepper)
             // This sets the Arduino's internal position counter without physical movement
             stepper_ops.reset(stepper_idx, max_pos)?;
+            if let Some(pos) = positions.get_mut(stepper_idx) {
+                *pos = max_pos;
+            }
             
             // Move down until sensor is touched
             // Track position locally (like surfer.py's pos_local)
             let mut pos_local = max_pos;
             let mut touched = false;
-            let mut steps_moved = 0;
             
             while !touched {
                 // Check exit flag
@@ -780,24 +786,9 @@ impl Operations {
                     }
                 }
                 
-                // Check if we've hit minimum position (like surfer.py checks pos_local <= z_step.min_pos)
-                if pos_local <= min_pos {
-                    messages.push(format!("Stepper {} bottomed out during calibration (reached min_pos {} without touching) - disabling and setting to max_pos {}", stepper_idx, min_pos, max_pos));
-                    // Disable the stepper since it can't reach the sensor
-                    self.set_stepper_enabled(stepper_idx, false);
-                    stepper_ops.disable(stepper_idx)?;
-                    // Set to max_pos (not 0) since it started at max_pos
-                    stepper_ops.reset(stepper_idx, max_pos)?;
-                    if let Some(pos) = positions.get_mut(stepper_idx) {
-                        *pos = max_pos;
-                    }
-                    break;
-                }
-                
-                // Check sensor
+                // Check sensor BEFORE moving (surfer.py checks before move)
                 match gpio.press_check(Some(gpio_index)) {
                     Ok(states) => {
-                        // When button_index is Some, press_check returns Vec with one element at index 0
                         if let Some(&is_touching) = states.get(0) {
                             if is_touching {
                                 touched = true;
@@ -811,10 +802,26 @@ impl Operations {
                     }
                 }
                 
+                // Check if we've hit minimum position BEFORE moving
+                if pos_local <= min_pos {
+                    messages.push(format!("Stepper {} bottomed out during calibration (reached min_pos {} without touching) - disabling and setting to max_pos {}", stepper_idx, min_pos, max_pos));
+                    // Disable the stepper since it can't reach the sensor
+                    self.set_stepper_enabled(stepper_idx, false);
+                    stepper_ops.disable(stepper_idx)?;
+                    // Set to max_pos (not 0) since it started at max_pos
+                    stepper_ops.reset(stepper_idx, max_pos)?;
+                    if let Some(pos) = positions.get_mut(stepper_idx) {
+                        *pos = max_pos;
+                    }
+                    break;
+                }
+                
                 // Move down (like surfer.py's rmove with down_step)
                 self.rel_move_z(stepper_ops, stepper_idx, z_down_step)?;
-                pos_local += z_down_step; // Update local position tracker
-                steps_moved += z_down_step.abs();
+                pos_local += z_down_step; // Update local position tracker (z_down_step is negative)
+                if let Some(pos) = positions.get_mut(stepper_idx) {
+                    *pos += z_down_step; // Also update positions array
+                }
                 
                 // Wait using z_rest timing (like surfer.py's waiter(config.ins.z_rest))
                 self.rest_z();
