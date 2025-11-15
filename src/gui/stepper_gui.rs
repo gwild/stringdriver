@@ -608,7 +608,7 @@ impl StepperGUI {
         if let Some(ref mut tuner_port) = self.tuner_port {
             let send = b"1;";
             let log_msg = format!("TUNER SEND: {:?}", send);
-            drop(tuner_port); // Release borrow before logging
+            let _ = tuner_port; // Release borrow before logging
             self.log(&log_msg);
             
             let received = {
@@ -640,7 +640,7 @@ impl StepperGUI {
                                 thread::sleep(Duration::from_millis(10));
                                 continue;
                             }
-                            drop(port); // Release borrow before logging
+                            let _ = port; // Release borrow before logging
                             let log_msg = format!("Tuner read error: {}", e);
                             self.log(&log_msg);
                             break;
@@ -1044,7 +1044,7 @@ impl eframe::App for StepperGUI {
                                     // Check this FIRST before syncing, otherwise we'll reset pending value
                                     if lost_focus && enter_pressed {
                                         let pending_value = *pending; // Capture value before any reset
-                                        drop(pending); // Release borrow
+                                        let _ = pending; // Release borrow
                                         self.log(&format!("DEBUG Enter pressed for left_idx={}: pending_value={}, current_pos={}", 
                                             left_idx, pending_value, current_pos));
                                         let clamped = pending_value.clamp(-100, 100);
@@ -1124,7 +1124,7 @@ impl eframe::App for StepperGUI {
                                     // Check this FIRST before syncing, otherwise we'll reset pending value
                                     if lost_focus && enter_pressed {
                                         let pending_value = *pending; // Capture value before any reset
-                                        drop(pending); // Release borrow
+                                        let _ = pending; // Release borrow
                                         self.log(&format!("DEBUG Enter pressed for right_idx={}: pending_value={}, current_pos={}", 
                                             right_idx, pending_value, current_pos));
                                         let clamped = pending_value.clamp(-100, 100);
