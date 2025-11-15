@@ -7,6 +7,9 @@ use serde_yaml;
 use anyhow::{anyhow, Result};
 use std::fs::File;
 use std::path::PathBuf;
+use std::env;
+use dotenvy::dotenv;
+use gethostname::gethostname;
 
 // -------------------- Arduino (carriage) config --------------------
 
@@ -343,4 +346,28 @@ pub fn load_gpio_settings(hostname: &str) -> Result<Option<GpioSettings>> {
         max_steps,
         components,
     }))
+}
+
+// -------------------- Database config --------------------
+
+#[derive(Debug, Clone)]
+pub struct DbSettings {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub password: String,
+    pub database: String,
+}
+
+impl DbSettings {
+    pub fn from_env() -> Result<Self> {
+        let _ = dotenv();
+        let hostname = gethostname().to_string_lossy().to_string();
+        let host = env::var("PG_HOST").or_else(|_| env::var("DB_HOST")).unwrap_or_else(|_| "192.168.1.84".to_string());
+        let port = env::var("PG_PORT").or_else(|_| env::var("DB_PORT")).ok().and_then(|s| s.parse().ok()).unwrap_or(5432);
+        let user = env::var("PG_USER").or_else(|_| env::var("DB_USER")).unwrap_or_else(|_| "GJW".to_string());
+        let password = env::var("PG_PASSWORD").or_else(|_| env::var("DB_PASSWORD")).map_err(|_| anyhow!("PG_PASSWORD or DB_PASSWORD environment variable required"))?;
+        let database = env::var("PG_DATABASE").or_else(|_| env::var("DB_NAME")).unwrap_or_else(|_| "String_Driver".to_string());
+        Ok(Self { host, port, user, password, database })
+    }
 }

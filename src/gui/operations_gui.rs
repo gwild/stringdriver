@@ -10,14 +10,18 @@ mod gpio;
 mod operations;
 #[path = "../get_results.rs"]
 mod get_results;
+#[path = "../machine_state_logger.rs"]
+mod machine_state_logger;
 
 use eframe::egui;
 use anyhow::Result;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::os::unix::net::UnixStream;
 use std::process::Command;
+use uuid::Uuid;
+use chrono::Utc;
 
 /// Type alias for partials slot (matches partials_slot::PartialsSlot pattern)
 /// Using get_results::PartialsData type
@@ -102,7 +106,7 @@ impl operations::StepperOperations for ArduinoStepperOps {
 
 /// Operations GUI state
 struct OperationsGUI {
-    operations: operations::Operations,
+    operations: Arc<Mutex<operations::Operations>>,
     message: String,
     partials_slot: PartialsSlot,
     selected_operation: String,
@@ -118,6 +122,9 @@ struct OperationsGUI {
     exit_flag: Arc<AtomicBool>,
     // Operation lock to prevent concurrent execution
     operation_running: Arc<AtomicBool>,
+    // Machine state logging
+    logging_enabled: bool,
+    logger: Option<machine_state_logger::MachineStateLoggingContext>,
 }
 
 impl OperationsGUI {
@@ -132,8 +139,8 @@ impl OperationsGUI {
         let string_num = ard_settings.string_num;
         let port_path = ard_settings.port.clone();
         
-        // Create operations with the partials slot
-        let operations = operations::Operations::new_with_partials_slot(Some(Arc::clone(&partials_slot)))?;
+        // Create operations with the partials slot (wrap in Arc<Mutex> for sharing with logging thread)
+        let operations = Arc::new(Mutex::new(operations::Operations::new_with_partials_slot(Some(Arc::clone(&partials_slot)))?));
         
         // Create Arduino stepper operations client (connects via IPC to stepper_gui's connection)
         let arduino_ops = ArduinoStepperOps::new(&port_path);
@@ -158,7 +165,93 @@ impl OperationsGUI {
         });
         
         // Initialize thresholds with defaults
-        let string_num = operations.string_num;
+        let string_num = operations.lock().unwrap().string_num;
+        let voice_count_min = vec![2; string_num];
+        let voice_count_max = vec![12; string_num];
+        let amp_sum_min = vec![20; string_num];
+        let amp_sum_max = vec![250; string_num];
+        let stepper_positions = std::collections::HashMap::new();
+        
+        // Initialize machine state logging (non-blocking, can fail silently)
+        let logger = config_loader::DbSettings::from_env()
+            .ok()
+            .and_then(|db_config| {
+                machine_state_logger::MachineStateLoggingContext::new_nonblocking(db_config).into()
+            });
+        
+        // Start 1Hz logging thread if logger available
+        // Uses existing position arrays - does NOT query Arduino (non-blocking)
+        if let Some(ref logger_ref) = logger {
+            let logger_clone = logger_ref.clone();
+            let operations_clone = Arc::clone(&operations);
+            let stepper_positions_clone = Arc::new(Mutex::new(stepper_positions.clone()));
+            let voice_count_min_clone = Arc::new(Mutex::new(voice_count_min.clone()));
+            let voice_count_max_clone = Arc::new(Mutex::new(voice_count_max.clone()));
+            let amp_sum_min_clone = Arc::new(Mutex::new(amp_sum_min.clone()));
+            let amp_sum_max_clone = Arc::new(Mutex::new(amp_sum_max.clone()));
+            let hostname_clone = hostname.clone();
+            let total_steppers = ard_settings.num_steppers;
+            thread::spawn(move || {
+                use std::time::Instant;
+                let mut last_log = Instant::now();
+                const LOG_INTERVAL: Duration = Duration::from_secs(1); // 1Hz
+                loop {
+                    thread::sleep(Duration::from_millis(100));
+                    if Instant::now().duration_since(last_log) >= LOG_INTERVAL {
+                        if logger_clone.is_enabled() {
+                            // Capture machine state from existing arrays (non-blocking, no Arduino query)
+                            if let (Ok(ops), Ok(positions_map), Ok(vc_min), Ok(vc_max), Ok(amp_min), Ok(amp_max)) = 
+                                (operations_clone.lock(), stepper_positions_clone.lock(), 
+                                 voice_count_min_clone.lock(), voice_count_max_clone.lock(),
+                                 amp_sum_min_clone.lock(), amp_sum_max_clone.lock()) {
+                                
+                                // Build complete position array from existing HashMap
+                                let mut all_positions = vec![0i32; total_steppers];
+                                let mut all_enabled = vec![false; total_steppers];
+                                
+                                // Fill from positions map (uses existing tracked positions)
+                                for (idx, &pos) in positions_map.iter() {
+                                    if *idx < all_positions.len() {
+                                        all_positions[*idx] = pos;
+                                        all_enabled[*idx] = ops.get_stepper_enabled(*idx);
+                                    }
+                                }
+                                
+                                // Get all settings from Operations struct
+                                let snapshot = machine_state_logger::MachineStateSnapshot {
+                                    state_id: Uuid::new_v4(),
+                                    controls_id: None, // TODO: Get from audmon shared memory
+                                    host: hostname_clone.clone(),
+                                    recorded_at: Utc::now(),
+                                    stepper_positions: all_positions,
+                                    stepper_enabled: all_enabled,
+                                    bump_check_enable: ops.get_bump_check_enable(),
+                                    z_up_step: ops.get_z_up_step(),
+                                    z_down_step: ops.get_z_down_step(),
+                                    tune_rest: ops.get_tune_rest(),
+                                    x_rest: ops.get_x_rest(),
+                                    z_rest: ops.get_z_rest(),
+                                    lap_rest: ops.get_lap_rest(),
+                                    adjustment_level: ops.get_adjustment_level(),
+                                    retry_threshold: ops.get_retry_threshold(),
+                                    delta_threshold: ops.get_delta_threshold(),
+                                    z_variance_threshold: ops.get_z_variance_threshold(),
+                                    voice_count: ops.get_voice_count().iter().map(|&x| x as i32).collect(),
+                                    amp_sum: ops.get_amp_sum(),
+                                    voice_count_min: vc_min.clone(),
+                                    voice_count_max: vc_max.clone(),
+                                    amp_sum_min: amp_min.clone(),
+                                    amp_sum_max: amp_max.clone(),
+                                };
+                                logger_clone.insert_machine_state(&snapshot);
+                            }
+                        }
+                        last_log = Instant::now();
+                    }
+                }
+            });
+        }
+        
         Ok(Self {
             operations,
             message: String::new(),
@@ -167,11 +260,13 @@ impl OperationsGUI {
             partials_slot,
             selected_operation: "None".to_string(),
             arduino_ops: Some(arduino_ops),
-            voice_count_min: vec![2; string_num],
-            voice_count_max: vec![12; string_num],
-            amp_sum_min: vec![20; string_num],
-            amp_sum_max: vec![250; string_num],
-            stepper_positions: std::collections::HashMap::new(),
+            voice_count_min,
+            voice_count_max,
+            amp_sum_min,
+            amp_sum_max,
+            stepper_positions,
+            logging_enabled: logger.is_some(),
+            logger,
         })
     }
     
@@ -201,7 +296,7 @@ impl OperationsGUI {
         self.operation_running.store(true, std::sync::atomic::Ordering::Relaxed);
         
         // Get current positions - use tracked positions, defaulting to 0
-        let z_indices = self.operations.get_z_stepper_indices();
+        let z_indices = self.operations.lock().unwrap().get_z_stepper_indices();
         let max_idx = z_indices.iter().max().copied().unwrap_or(0);
         let mut positions = vec![0i32; max_idx + 1];
         for &idx in &z_indices {
@@ -217,7 +312,7 @@ impl OperationsGUI {
                 self.append_message("Executing Z Calibrate...");
                 let result = {
                     let stepper_ops = self.arduino_ops.as_mut().unwrap();
-                    self.operations.z_calibrate(
+                    self.operations.lock().unwrap().z_calibrate(
                         stepper_ops,
                         &mut positions,
                         &max_positions,
@@ -248,7 +343,7 @@ impl OperationsGUI {
                 
                 let result = {
                     let stepper_ops = self.arduino_ops.as_mut().unwrap();
-                    self.operations.z_adjust(
+                    self.operations.lock().unwrap().z_adjust(
                         stepper_ops,
                         &mut positions,
                         &min_thresholds,
@@ -282,7 +377,7 @@ impl OperationsGUI {
                 }
                 let result = {
                     let stepper_ops = self.arduino_ops.as_mut().unwrap();
-                    self.operations.bump_check(
+                    self.operations.lock().unwrap().bump_check(
                         None,
                         &mut positions,
                         &max_positions,
@@ -409,10 +504,25 @@ impl eframe::App for OperationsGUI {
         
         // Update audio analysis from partials slot using get_results module
         let partials = get_results::read_partials_from_slot(&self.partials_slot);
-        self.operations.update_audio_analysis_with_partials(partials);
+        self.operations.lock().unwrap().update_audio_analysis_with_partials(partials);
         
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Operations Control");
+            
+            // Machine state logging enable checkbox at top
+            ui.horizontal(|ui| {
+                ui.label("Machine State Logging:");
+                if let Some(ref logger) = self.logger {
+                    let mut enabled = logger.is_enabled();
+                    if ui.checkbox(&mut enabled, "Enabled").changed() {
+                        logger.set_enabled(enabled);
+                        self.logging_enabled = enabled;
+                        self.append_message(&format!("Machine state logging {}", if enabled { "enabled" } else { "disabled" }));
+                    }
+                } else {
+                    ui.label("(Database not configured)");
+                }
+            });
             
             ui.separator();
             
@@ -421,44 +531,44 @@ impl eframe::App for OperationsGUI {
             
             ui.horizontal(|ui| {
                 ui.label("Adjustment Level:");
-                let mut adjustment_level = self.operations.get_adjustment_level();
+                let mut adjustment_level = self.operations.lock().unwrap().get_adjustment_level();
                 let mut drag = egui::DragValue::new(&mut adjustment_level);
                 drag = drag.clamp_range(1..=100);
                 if ui.add(drag).changed() {
-                    self.operations.set_adjustment_level(adjustment_level);
+                    self.operations.lock().unwrap().set_adjustment_level(adjustment_level);
                     self.append_message(&format!("Adjustment level set to {}", adjustment_level));
                 }
             });
             
             ui.horizontal(|ui| {
                 ui.label("Retry Threshold:");
-                let mut retry_threshold = self.operations.get_retry_threshold();
+                let mut retry_threshold = self.operations.lock().unwrap().get_retry_threshold();
                 let mut drag = egui::DragValue::new(&mut retry_threshold);
                 drag = drag.clamp_range(1..=1000);
                 if ui.add(drag).changed() {
-                    self.operations.set_retry_threshold(retry_threshold);
+                    self.operations.lock().unwrap().set_retry_threshold(retry_threshold);
                     self.append_message(&format!("Retry threshold set to {}", retry_threshold));
                 }
             });
             
             ui.horizontal(|ui| {
                 ui.label("Delta Threshold:");
-                let mut delta_threshold = self.operations.get_delta_threshold();
+                let mut delta_threshold = self.operations.lock().unwrap().get_delta_threshold();
                 let mut drag = egui::DragValue::new(&mut delta_threshold);
                 drag = drag.clamp_range(1..=1000);
                 if ui.add(drag).changed() {
-                    self.operations.set_delta_threshold(delta_threshold);
+                    self.operations.lock().unwrap().set_delta_threshold(delta_threshold);
                     self.append_message(&format!("Delta threshold set to {}", delta_threshold));
                 }
             });
             
             ui.horizontal(|ui| {
                 ui.label("Z Variance Threshold:");
-                let mut z_variance_threshold = self.operations.get_z_variance_threshold();
+                let mut z_variance_threshold = self.operations.lock().unwrap().get_z_variance_threshold();
                 let mut drag = egui::DragValue::new(&mut z_variance_threshold);
                 drag = drag.clamp_range(1..=1000);
                 if ui.add(drag).changed() {
-                    self.operations.set_z_variance_threshold(z_variance_threshold);
+                    self.operations.lock().unwrap().set_z_variance_threshold(z_variance_threshold);
                     self.append_message(&format!("Z variance threshold set to {}", z_variance_threshold));
                 }
             });
@@ -470,44 +580,44 @@ impl eframe::App for OperationsGUI {
             
             ui.horizontal(|ui| {
                 ui.label("Tune Rest:");
-                let mut tune_rest = self.operations.get_tune_rest();
+                let mut tune_rest = self.operations.lock().unwrap().get_tune_rest();
                 let mut drag = egui::DragValue::new(&mut tune_rest).speed(0.1);
                 drag = drag.clamp_range(0.0..=100.0);
                 if ui.add(drag).changed() {
-                    self.operations.set_tune_rest(tune_rest);
+                    self.operations.lock().unwrap().set_tune_rest(tune_rest);
                     self.append_message(&format!("Tune rest set to {:.2}", tune_rest));
                 }
             });
             
             ui.horizontal(|ui| {
                 ui.label("X Rest:");
-                let mut x_rest = self.operations.get_x_rest();
+                let mut x_rest = self.operations.lock().unwrap().get_x_rest();
                 let mut drag = egui::DragValue::new(&mut x_rest).speed(0.1);
                 drag = drag.clamp_range(0.0..=100.0);
                 if ui.add(drag).changed() {
-                    self.operations.set_x_rest(x_rest);
+                    self.operations.lock().unwrap().set_x_rest(x_rest);
                     self.append_message(&format!("X rest set to {:.2}", x_rest));
                 }
             });
             
             ui.horizontal(|ui| {
                 ui.label("Z Rest:");
-                let mut z_rest = self.operations.get_z_rest();
+                let mut z_rest = self.operations.lock().unwrap().get_z_rest();
                 let mut drag = egui::DragValue::new(&mut z_rest).speed(0.1);
                 drag = drag.clamp_range(0.0..=100.0);
                 if ui.add(drag).changed() {
-                    self.operations.set_z_rest(z_rest);
+                    self.operations.lock().unwrap().set_z_rest(z_rest);
                     self.append_message(&format!("Z rest set to {:.2}", z_rest));
                 }
             });
             
             ui.horizontal(|ui| {
                 ui.label("Lap Rest:");
-                let mut lap_rest = self.operations.get_lap_rest();
+                let mut lap_rest = self.operations.lock().unwrap().get_lap_rest();
                 let mut drag = egui::DragValue::new(&mut lap_rest).speed(0.1);
                 drag = drag.clamp_range(0.0..=100.0);
                 if ui.add(drag).changed() {
-                    self.operations.set_lap_rest(lap_rest);
+                    self.operations.lock().unwrap().set_lap_rest(lap_rest);
                     self.append_message(&format!("Lap rest set to {:.2}", lap_rest));
                 }
             });
@@ -525,7 +635,7 @@ impl eframe::App for OperationsGUI {
                 });
             });
             
-            let voice_count = self.operations.get_voice_count();
+            let voice_count = self.operations.lock().unwrap().get_voice_count();
             const NUM_PARTIALS: f32 = 12.0; // Number of partials per channel
             for (ch_idx, count) in voice_count.iter().enumerate() {
                 ui.horizontal(|ui| {
@@ -594,7 +704,7 @@ impl eframe::App for OperationsGUI {
                 });
             });
             
-            let amp_sum = self.operations.get_amp_sum();
+            let amp_sum = self.operations.lock().unwrap().get_amp_sum();
             for (ch_idx, sum) in amp_sum.iter().enumerate() {
                 ui.horizontal(|ui| {
                     // Ensure we have enough elements in the vectors
@@ -657,15 +767,15 @@ impl eframe::App for OperationsGUI {
             ui.heading("Stepper Enable/Disable");
             ui.label("(Controls which steppers participate in operations/bump_check)");
             
-            let z_indices = self.operations.get_z_stepper_indices();
-            let bump_status = self.operations.get_bump_status();
+            let (z_indices, bump_status, num_pairs, z_first) = {
+                let ops_guard = self.operations.lock().unwrap();
+                (ops_guard.get_z_stepper_indices(), ops_guard.get_bump_status(), ops_guard.string_num, ops_guard.z_first_index)
+            };
             let bump_map: std::collections::HashMap<usize, bool> = bump_status.iter().cloned().collect();
             
             // Arrange steppers in pairs matching stepper_gui layout:
             // Left column: "out" stepper (odd index, Stepper2)
             // Right column: "in" stepper (even index, Stepper1)
-            let num_pairs = self.operations.string_num;
-            let z_first = self.operations.z_first_index;
             
             for row in 0..num_pairs {
                 let left_idx = z_first + (row * 2) + 1;  // "out" stepper (odd)
@@ -679,7 +789,7 @@ impl eframe::App for OperationsGUI {
                 ui.horizontal(|ui| {
                     // Left column: "out" stepper (Stepper2)
                     ui.vertical(|ui| {
-                        let mut enabled = self.operations.get_stepper_enabled(left_idx);
+                        let mut enabled = self.operations.lock().unwrap().get_stepper_enabled(left_idx);
                         let is_bumping = bump_map.get(&left_idx).copied().unwrap_or(false);
                         
                         let status_indicator = if is_bumping { " 🔴" } else { " ⚪" };
@@ -689,7 +799,7 @@ impl eframe::App for OperationsGUI {
                             status_indicator);
                         
                         if ui.checkbox(&mut enabled, &label).changed() {
-                            self.operations.set_stepper_enabled(left_idx, enabled);
+                            self.operations.lock().unwrap().set_stepper_enabled(left_idx, enabled);
                             self.append_message(&format!("Stepper {} {}", left_idx, if enabled { "enabled" } else { "disabled" }));
                         }
                         
@@ -700,7 +810,7 @@ impl eframe::App for OperationsGUI {
                     
                     // Right column: "in" stepper (Stepper1)
                     ui.vertical(|ui| {
-                        let mut enabled = self.operations.get_stepper_enabled(right_idx);
+                        let mut enabled = self.operations.lock().unwrap().get_stepper_enabled(right_idx);
                         let is_bumping = bump_map.get(&right_idx).copied().unwrap_or(false);
                         
                         let status_indicator = if is_bumping { " 🔴" } else { " ⚪" };
@@ -710,7 +820,7 @@ impl eframe::App for OperationsGUI {
                             status_indicator);
                         
                         if ui.checkbox(&mut enabled, &label).changed() {
-                            self.operations.set_stepper_enabled(right_idx, enabled);
+                            self.operations.lock().unwrap().set_stepper_enabled(right_idx, enabled);
                             self.append_message(&format!("Stepper {} {}", right_idx, if enabled { "enabled" } else { "disabled" }));
                         }
                         
