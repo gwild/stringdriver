@@ -838,8 +838,6 @@ impl StepperGUI {
 impl eframe::App for StepperGUI {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("String Driver Stepper Control");
-            
             if !self.connected {
                 ui.label("Connecting to Arduino...");
                 return;
@@ -1359,7 +1357,7 @@ fn main() {
         ..Default::default()
     };
     let _ = eframe::run_native(
-        "String Driver Stepper Control",
+        "Stepper Control",
         options,
         Box::new(|_cc| Box::new(wrapper))
     );
