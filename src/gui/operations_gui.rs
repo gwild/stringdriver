@@ -15,7 +15,7 @@ use eframe::egui;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::os::unix::net::UnixStream;
 
 /// Type alias for partials slot (matches partials_slot::PartialsSlot pattern)
@@ -106,7 +106,6 @@ struct OperationsGUI {
     partials_slot: PartialsSlot,
     selected_operation: String,
     arduino_ops: Option<ArduinoStepperOps>,
-    last_bump_check: Instant,
     // Thresholds for z_adjust operation
     voice_count_min: Vec<i32>,  // Per-channel minimum voice count
     voice_count_max: Vec<i32>,  // Per-channel maximum voice count
@@ -161,7 +160,6 @@ impl OperationsGUI {
             partials_slot,
             selected_operation: "None".to_string(),
             arduino_ops: Some(arduino_ops),
-            last_bump_check: Instant::now() - Duration::from_secs(1),
             voice_count_min: vec![2; string_num],
             voice_count_max: vec![12; string_num],
             amp_sum_min: vec![20; string_num],
@@ -256,6 +254,38 @@ impl OperationsGUI {
                     }
                 }
             }
+            "bump_check" => {
+                self.append_message("Executing Bump Check...");
+                if z_indices.is_empty() {
+                    self.append_message("No Z steppers configured");
+                    return;
+                }
+                let result = {
+                    let stepper_ops = self.arduino_ops.as_mut().unwrap();
+                    self.operations.bump_check(
+                        None,
+                        &mut positions,
+                        &max_positions,
+                        stepper_ops,
+                        None,
+                    )
+                };
+                match result {
+                    Ok(msg) => {
+                        for &idx in &z_indices {
+                            if idx < positions.len() {
+                                self.stepper_positions.insert(idx, positions[idx]);
+                            }
+                        }
+                        if msg.trim().is_empty() {
+                            self.append_message("Bump check complete (no bumps detected).");
+                        } else {
+                            self.append_message(&msg);
+                        }
+                    }
+                    Err(e) => self.append_message(&format!("Bump check error: {}", e)),
+                }
+            }
             _ => {
                 self.append_message("No operation selected");
             }
@@ -272,56 +302,8 @@ impl eframe::App for OperationsGUI {
         let partials = get_results::read_partials_from_slot(&self.partials_slot);
         self.operations.update_audio_analysis_with_partials(partials);
         
-        // Call bump_check if enabled (after audio analysis update)
-        if self.operations.get_bump_check_enable() {
-            let now = Instant::now();
-            if now.duration_since(self.last_bump_check) >= Duration::from_secs(1) {
-            if let Some(ref mut stepper_ops) = self.arduino_ops {
-                // Get current positions
-                let z_indices = self.operations.get_z_stepper_indices();
-                let max_idx = z_indices.iter().max().copied().unwrap_or(0);
-                let mut positions = vec![0i32; max_idx + 1];
-                for &idx in &z_indices {
-                    positions[idx] = self.stepper_positions.get(&idx).copied().unwrap_or(0);
-                }
-                
-                // Build max_positions map
-                let mut max_positions = std::collections::HashMap::new();
-                for &idx in &z_indices {
-                    max_positions.insert(idx, 100); // Default max position
-                }
-                
-                // Call bump_check (it will actively move steppers up if touching)
-                let _bump_msg = self.operations.bump_check(
-                    None, // Check all steppers
-                    &mut positions,
-                    &max_positions,
-                    stepper_ops,
-                    None, // No exit flag
-                );
-                // Update tracked positions after bump_check (it may have moved steppers)
-                for &idx in &z_indices {
-                    if idx < positions.len() {
-                        self.stepper_positions.insert(idx, positions[idx]);
-                    }
-                }
-                self.last_bump_check = now;
-            }
-            }
-        }
-        
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Operations Control");
-            
-            ui.separator();
-            
-            // Bump check enable checkbox
-            let mut bump_check_enable = self.operations.get_bump_check_enable();
-            ui.checkbox(&mut bump_check_enable, "Bump Check Enable");
-            if bump_check_enable != self.operations.get_bump_check_enable() {
-                self.operations.set_bump_check_enable(bump_check_enable);
-                self.append_message(&format!("Bump check {}", if bump_check_enable { "enabled" } else { "disabled" }));
-            }
             
             ui.separator();
             
@@ -642,6 +624,7 @@ impl eframe::App for OperationsGUI {
                         ui.selectable_value(&mut self.selected_operation, "None".to_string(), "None");
                         ui.selectable_value(&mut self.selected_operation, "z_calibrate".to_string(), "Z Calibrate");
                         ui.selectable_value(&mut self.selected_operation, "z_adjust".to_string(), "Z Adjust");
+                        ui.selectable_value(&mut self.selected_operation, "bump_check".to_string(), "Bump Check");
                     });
                 
                 if ui.button("Execute").clicked() && self.selected_operation != "None" {

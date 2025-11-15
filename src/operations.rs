@@ -569,10 +569,6 @@ impl Operations {
         stepper_ops: &mut T,
         exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<String> {
-        if !self.get_bump_check_enable() {
-            return Ok(String::new());
-        }
-
         let gpio = self.gpio.as_ref().ok_or_else(|| anyhow!("GPIO not initialized"))?;
         if !gpio.exist {
             return Ok("\nno GPIO".to_string());
