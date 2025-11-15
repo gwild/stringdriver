@@ -802,10 +802,6 @@ impl eframe::App for OperationsGUI {
                             self.operations.lock().unwrap().set_stepper_enabled(left_idx, enabled);
                             self.append_message(&format!("Stepper {} {}", left_idx, if enabled { "enabled" } else { "disabled" }));
                         }
-                        
-                        if is_bumping {
-                            ui.colored_label(egui::Color32::RED, "BUMPING");
-                        }
                     });
                     
                     // Right column: "in" stepper (Stepper1)
@@ -822,10 +818,6 @@ impl eframe::App for OperationsGUI {
                         if ui.checkbox(&mut enabled, &label).changed() {
                             self.operations.lock().unwrap().set_stepper_enabled(right_idx, enabled);
                             self.append_message(&format!("Stepper {} {}", right_idx, if enabled { "enabled" } else { "disabled" }));
-                        }
-                        
-                        if is_bumping {
-                            ui.colored_label(egui::Color32::RED, "BUMPING");
                         }
                     });
                 });

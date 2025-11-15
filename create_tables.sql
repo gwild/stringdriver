@@ -5,7 +5,7 @@
 -- Captures ALL stepper positions, ALL operations control settings, and runtime audio analysis data
 CREATE TABLE IF NOT EXISTS machine_state (
     state_id UUID PRIMARY KEY,
-    controls_id UUID,  -- Links to audmon's controls table for concurrent time-series correlation
+    controls_id TEXT,  -- Links to audmon's controls table (text in audmon schema)
     host VARCHAR(255) NOT NULL,
     recorded_at TIMESTAMP WITH TIME ZONE NOT NULL,
     
