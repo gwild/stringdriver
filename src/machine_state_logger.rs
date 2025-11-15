@@ -18,6 +18,8 @@ use uuid::Uuid;
 
 use crate::config_loader::DbSettings;
 
+const DB_BUFFER_FULL_MSG: &str = "DB write buffer is full.";
+
 // Event-driven database write commands
 enum DbWriteCommand {
     InsertMachineState(MachineStateSnapshot),
@@ -201,7 +203,7 @@ impl MachineStateLoggingContext {
                 match tx.try_send(DbWriteCommand::InsertMachineState(snapshot.clone())) {
                     Ok(_) => {},
                     Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                        warn!(target: "machine_state_logger", "DB write buffer is at capacity.");
+                        warn!(target: "machine_state_logger", "{}", DB_BUFFER_FULL_MSG);
                     }
                     Err(_) => {},
                 }
@@ -213,8 +215,12 @@ impl MachineStateLoggingContext {
         if !self.enabled.load(Ordering::Relaxed) { return; }
         if let Ok(guard) = self.write_tx.lock() {
             if let Some(tx) = guard.as_ref() {
-                if let Err(std::sync::mpsc::TrySendError::Full(_)) = tx.try_send(DbWriteCommand::InsertOperation(event.clone())) {
-                    warn!(target: "machine_state_logger", "DB write buffer is full ");
+                match tx.try_send(DbWriteCommand::InsertOperation(event.clone())) {
+                    Ok(_) => {},
+                    Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                        warn!(target: "machine_state_logger", "{}", DB_BUFFER_FULL_MSG);
+                    }
+                    Err(_) => {},
                 }
             }
         }
