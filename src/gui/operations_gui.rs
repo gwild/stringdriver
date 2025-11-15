@@ -13,10 +13,11 @@ mod get_results;
 
 use eframe::egui;
 use anyhow::Result;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use std::thread;
 use std::time::Duration;
 use std::os::unix::net::UnixStream;
+use std::process::Command;
 
 /// Type alias for partials slot (matches partials_slot::PartialsSlot pattern)
 /// Using get_results::PartialsData type
@@ -113,6 +114,8 @@ struct OperationsGUI {
     amp_sum_max: Vec<i32>,      // Per-channel maximum amplitude sum
     // Track stepper positions locally (updated as we move steppers)
     stepper_positions: std::collections::HashMap<usize, i32>,
+    // Exit flag to signal operations to stop
+    exit_flag: Arc<AtomicBool>,
 }
 
 impl OperationsGUI {
@@ -157,6 +160,7 @@ impl OperationsGUI {
         Ok(Self {
             operations,
             message: String::new(),
+            exit_flag: Arc::new(AtomicBool::new(false)),
             partials_slot,
             selected_operation: "None".to_string(),
             arduino_ops: Some(arduino_ops),
@@ -206,7 +210,7 @@ impl OperationsGUI {
                         stepper_ops,
                         &mut positions,
                         &max_positions,
-                        None,
+                        Some(&self.exit_flag),
                     )
                 };
                 match result {
@@ -236,7 +240,7 @@ impl OperationsGUI {
                         &max_thresholds,
                         &min_voices,
                         &max_voices,
-                        None,
+                        Some(&self.exit_flag),
                     )
                 };
                 match result {
@@ -267,7 +271,7 @@ impl OperationsGUI {
                         &mut positions,
                         &max_positions,
                         stepper_ops,
-                        None,
+                        Some(&self.exit_flag),
                     )
                 };
                 match result {
@@ -291,10 +295,76 @@ impl OperationsGUI {
             }
         }
     }
+    
+    /// Kill all processes and close GUI
+    fn kill_all(&mut self) {
+        self.append_message("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        self.append_message("KILL ALL triggered - shutting down everything...");
+        self.append_message("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        
+        // Set exit flag to stop any running operations
+        self.exit_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        
+        // Run kill script
+        let script_path = std::env::current_dir()
+            .unwrap_or_default()
+            .join("kill_all.sh");
+        
+        if script_path.exists() {
+            match Command::new("bash")
+                .arg(&script_path)
+                .output()
+            {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if !stdout.is_empty() {
+                        self.append_message(&stdout);
+                    }
+                    if !stderr.is_empty() {
+                        self.append_message(&format!("Errors: {}", stderr));
+                    }
+                }
+                Err(e) => {
+                    self.append_message(&format!("Failed to run kill script: {}", e));
+                }
+            }
+        } else {
+            self.append_message(&format!("Kill script not found at: {}", script_path.display()));
+            // Fallback: try pkill directly
+            let _ = Command::new("pkill")
+                .args(&["-f", "stepper_gui"])
+                .output();
+            let _ = Command::new("pkill")
+                .args(&["-f", "operations_gui"])
+                .output();
+            let _ = Command::new("pkill")
+                .args(&["-f", "audio_monitor"])
+                .output();
+            let _ = Command::new("pkill")
+                .args(&["-f", "audmon"])
+                .output();
+            self.append_message("Sent kill signals directly");
+        }
+        
+        // Close this window by exiting process
+        // Give a moment for kill script to run, then exit
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(500));
+            std::process::exit(0);
+        });
+    }
 }
 
 impl eframe::App for OperationsGUI {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Check exit flag and close window if set
+        if self.exit_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            // Request close via viewport command
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        
         // Request continuous repaints for smooth meter updates
         ctx.request_repaint_after(Duration::from_millis(16)); // ~60 Hz update rate
         
@@ -627,9 +697,14 @@ impl eframe::App for OperationsGUI {
                         ui.selectable_value(&mut self.selected_operation, "bump_check".to_string(), "Bump Check");
                     });
                 
-                if ui.button("Execute").clicked() && self.selected_operation != "None" {
-                    self.execute_operation();
-                }
+                ui.horizontal(|ui| {
+                    if ui.button("Execute").clicked() && self.selected_operation != "None" {
+                        self.execute_operation();
+                    }
+                    if ui.button("KILL ALL").clicked() {
+                        self.kill_all();
+                    }
+                });
             });
             
             ui.separator();
