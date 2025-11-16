@@ -149,6 +149,7 @@ struct OperationsGUI {
     // Operation lock to prevent concurrent execution
     operation_running: Arc<AtomicBool>,
     operation_task: Option<OperationTask>,
+    repeat_enabled: bool,
     // Machine state logging
     logging_enabled: bool,
     logger: Option<machine_state_logger::MachineStateLoggingContext>,
@@ -159,6 +160,7 @@ struct OperationTask {
 }
 
 struct OperationResult {
+    operation: String,
     message: String,
     updated_positions: std::collections::HashMap<usize, i32>,
 }
@@ -302,6 +304,7 @@ impl OperationsGUI {
             amp_sum_min,
             amp_sum_max,
             stepper_positions,
+            repeat_enabled: false,
             logging_enabled: logger.is_some(),
             logger,
         })
@@ -317,6 +320,7 @@ impl OperationsGUI {
     
     fn poll_operation_result(&mut self) {
         let mut should_clear = false;
+        let mut restart_operation: Option<String> = None;
         if let Some(task) = self.operation_task.as_mut() {
             match task.receiver.try_recv() {
                 Ok(result) => {
@@ -326,6 +330,9 @@ impl OperationsGUI {
                     self.append_message(&result.message);
                     self.operation_running.store(false, std::sync::atomic::Ordering::Relaxed);
                     should_clear = true;
+                    if self.repeat_enabled && self.selected_operation == result.operation {
+                        restart_operation = Some(result.operation.clone());
+                    }
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
@@ -339,8 +346,16 @@ impl OperationsGUI {
         if should_clear {
             self.operation_task = None;
         }
+
+        if let Some(op) = restart_operation {
+            if self.repeat_enabled {
+                self.append_message(&format!("Repeat enabled - re-running {}", op));
+                self.start_operation(op);
+            }
+        }
     }
-    
+
+
     /// Execute the selected operation
     fn execute_operation(&mut self) {
         if self.operation_running.load(std::sync::atomic::Ordering::Relaxed) {
@@ -355,6 +370,16 @@ impl OperationsGUI {
             return;
         }
 
+        let selected_operation = self.selected_operation.clone();
+        if selected_operation == "None" {
+            self.append_message("No operation selected");
+            return;
+        }
+
+        self.start_operation(selected_operation);
+    }
+
+    fn start_operation(&mut self, operation: String) {
         let arduino_ops = match self.arduino_ops.as_ref() {
             Some(ops) => Arc::clone(ops),
             None => {
@@ -369,16 +394,14 @@ impl OperationsGUI {
             return;
         }
 
-        let selected_operation = self.selected_operation.clone();
-        match selected_operation.as_str() {
+        match operation.as_str() {
             "z_calibrate" => self.append_message("Executing Z Calibrate..."),
             "z_adjust" => self.append_message("Executing Z Adjust..."),
             "bump_check" => self.append_message("Executing Bump Check..."),
-            _ => self.append_message("No operation selected"),
-        }
-
-        if selected_operation == "None" {
-            return;
+            _ => {
+                self.append_message("No operation selected");
+                return;
+            }
         }
 
         let max_idx = z_indices.iter().max().copied().unwrap_or(0);
@@ -401,6 +424,7 @@ impl OperationsGUI {
         let operations = Arc::clone(&self.operations);
         let exit_flag = Arc::clone(&self.exit_flag);
         let z_indices_clone = z_indices.clone();
+        let operation_label = operation.clone();
 
         let (tx, rx) = mpsc::channel();
         self.operation_task = Some(OperationTask { receiver: rx });
@@ -408,11 +432,13 @@ impl OperationsGUI {
 
         thread::spawn(move || {
             let mut local_positions = positions;
+            let op_name = operation_label;
             let operation_result = {
                 let mut stepper_client = match arduino_ops.lock() {
                     Ok(guard) => guard,
                     Err(_) => {
                         let _ = tx.send(OperationResult {
+                            operation: op_name.clone(),
                             message: "Error: Arduino client lock poisoned".to_string(),
                             updated_positions: std::collections::HashMap::new(),
                         });
@@ -423,6 +449,7 @@ impl OperationsGUI {
                     Ok(guard) => guard,
                     Err(_) => {
                         let _ = tx.send(OperationResult {
+                            operation: op_name.clone(),
                             message: "Error: Operations lock poisoned".to_string(),
                             updated_positions: std::collections::HashMap::new(),
                         });
@@ -430,7 +457,7 @@ impl OperationsGUI {
                     }
                 };
 
-                match selected_operation.as_str() {
+                match op_name.as_str() {
                     "z_calibrate" => ops_guard.z_calibrate(&mut *stepper_client, &mut local_positions, &max_positions, Some(&exit_flag)),
                     "z_adjust" => ops_guard.z_adjust(
                         &mut *stepper_client,
@@ -452,7 +479,7 @@ impl OperationsGUI {
                 }
             };
 
-            let message = match selected_operation.as_str() {
+            let message = match op_name.as_str() {
                 "bump_check" => match operation_result {
                     Ok(msg) => {
                         if msg.trim().is_empty() {
@@ -476,9 +503,10 @@ impl OperationsGUI {
                 }
             }
 
-            let _ = tx.send(OperationResult { message, updated_positions });
+            let _ = tx.send(OperationResult { operation: op_name, message, updated_positions });
         });
     }
+
 
     /// Kill all processes and close GUI
     fn kill_all(&mut self) {
@@ -930,9 +958,10 @@ impl eframe::App for OperationsGUI {
                     });
                 
                 ui.horizontal(|ui| {
-                    if ui.button("Execute").clicked() && self.selected_operation != "None" {
+                    if ui.button("Execute").clicked() {
                         self.execute_operation();
                     }
+                    ui.checkbox(&mut self.repeat_enabled, "Repeat");
                     if ui.button("KILL ALL").clicked() {
                         self.kill_all();
                     }

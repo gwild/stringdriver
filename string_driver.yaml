@@ -131,7 +131,6 @@ RaspberryPi:
     # so stepper_Commands builds the correct protocol table.
     ARD_NUM_STEPPERS: 7          # number of stepper positions reported by firmware
     ARD_PORT: /dev/ttyACM0
-    ARD_T_NUM_STEPPERS: 2
     X_MAX_POS: 2396
     z_up_step: 2
     z_down_step: -2
