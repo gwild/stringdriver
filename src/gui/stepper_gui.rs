@@ -14,12 +14,53 @@ use std::path::Path;
 
 #[path = "../config_loader.rs"]
 mod config_loader;
+use config_loader::ArduinoFirmware;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[arg(long)]
     debug: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CommandSet {
+    positions_cmd: &'static [u8],
+    rmove_id: u8,
+    set_stepper_id: u8,
+    set_accel_id: u8,
+    set_speed_id: u8,
+    set_min_id: u8,
+    set_max_id: u8,
+}
+
+impl CommandSet {
+    const fn new(
+        positions_cmd: &'static [u8],
+        rmove_id: u8,
+        set_stepper_id: u8,
+        set_accel_id: u8,
+        set_speed_id: u8,
+        set_min_id: u8,
+        set_max_id: u8,
+    ) -> Self {
+        Self {
+            positions_cmd,
+            rmove_id,
+            set_stepper_id,
+            set_accel_id,
+            set_speed_id,
+            set_min_id,
+            set_max_id,
+        }
+    }
+
+    fn for_firmware(firmware: ArduinoFirmware) -> Self {
+        match firmware {
+            ArduinoFirmware::StringDriverV1 => CommandSet::new(b"2;", 4, 7, 8, 9, 10, 11),
+            ArduinoFirmware::StringDriverV2 => CommandSet::new(b"1;", 3, 6, 7, 8, 9, 10),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -59,6 +100,9 @@ struct StepperGUI {
     z_up_step: i32,
     z_down_step: i32,
     socket_path: String,
+    firmware: ArduinoFirmware,
+    command_set: CommandSet,
+    tuner_command_set: CommandSet,
 }
 
 impl Default for StepperGUI {
@@ -96,12 +140,15 @@ impl Default for StepperGUI {
             z_up_step: 2,
             z_down_step: -2,
             socket_path: String::new(),
+            firmware: ArduinoFirmware::StringDriverV2,
+            command_set: CommandSet::for_firmware(ArduinoFirmware::StringDriverV2),
+            tuner_command_set: CommandSet::for_firmware(ArduinoFirmware::StringDriverV2),
         }
     }
 }
 
 impl StepperGUI {
-    fn new(port_path: String, num_steppers: usize, string_num: usize, x_step_index: Option<usize>, z_first_index: Option<usize>, tuner_first_index: Option<usize>, tuner_port_path: Option<String>, tuner_num_steppers: Option<usize>, debug: bool, debug_file: Option<File>, z_up_step: i32, z_down_step: i32) -> Self {
+    fn new(port_path: String, num_steppers: usize, string_num: usize, x_step_index: Option<usize>, z_first_index: Option<usize>, tuner_first_index: Option<usize>, tuner_port_path: Option<String>, tuner_num_steppers: Option<usize>, debug: bool, debug_file: Option<File>, z_up_step: i32, z_down_step: i32, firmware: ArduinoFirmware) -> Self {
         let mut s = Self::default();
         s.port_path = port_path;
         s.positions = vec![0; num_steppers];
@@ -113,6 +160,14 @@ impl StepperGUI {
         s.tuner_first_index = tuner_first_index;
         s.tuner_port_path = tuner_port_path.clone();
         s.tuner_num_steppers = tuner_num_steppers;
+        s.firmware = firmware;
+        let main_cmds = CommandSet::for_firmware(firmware);
+        s.command_set = main_cmds;
+        s.tuner_command_set = if tuner_port_path.is_some() {
+            CommandSet::for_firmware(ArduinoFirmware::StringDriverV2)
+        } else {
+            main_cmds
+        };
         if let Some(num) = tuner_num_steppers {
             s.tuner_positions = vec![0; num];
             // Set tuner min/max based on board type
@@ -367,7 +422,7 @@ impl StepperGUI {
 
     fn refresh_positions(&mut self) {
         if self.port.is_some() {
-            let send = b"1;";
+            let send = self.command_set.positions_cmd;
             self.log(&format!("SEND: {:?}", send));
             let received = {
                 let port = self.port.as_mut().unwrap();
@@ -492,7 +547,7 @@ impl StepperGUI {
         }
         let s = stepper as i16;
         self.log(&format!(">>> {} MOVING stepper {} by {} (rmove command)", source, stepper, delta));
-        self.send_cmd_bin(3, s, delta); // rmove is command ID 3, format "il"
+        self.send_cmd_bin(self.command_set.rmove_id, s, delta);
         self.log(&format!("Command sent, waiting for Arduino..."));
         // Arduino move is synchronous - wait for it to complete
         thread::sleep(Duration::from_millis(500));
@@ -525,7 +580,7 @@ impl StepperGUI {
         }
         let s = stepper as i16;
         self.log(&format!(">>> RESETTING stepper {} to {} (set_stepper command - no physical move)", stepper, position));
-        self.send_cmd_bin(4, s, position); // set_stepper is command ID 4, format "il" - sets position without moving
+        self.send_cmd_bin(self.command_set.set_stepper_id, s, position);
         self.log(&format!("Command sent, waiting for Arduino..."));
         // set_stepper is fast - just sets internal counter
         thread::sleep(Duration::from_millis(100));
@@ -543,7 +598,7 @@ impl StepperGUI {
         }
         let s = stepper as i16;
         self.log(&format!(">>> SETTING stepper {} acceleration to {} (set_accel command)", stepper, accel));
-        self.send_cmd_bin(7, s, accel); // set_accel is command ID 7
+        self.send_cmd_bin(self.command_set.set_accel_id, s, accel);
     }
 
     fn set_speed(&mut self, stepper: usize, speed: i32) {
@@ -556,7 +611,7 @@ impl StepperGUI {
         }
         let s = stepper as i16;
         self.log(&format!(">>> SETTING stepper {} speed to {} (set_speed command)", stepper, speed));
-        self.send_cmd_bin(8, s, speed); // set_speed is command ID 8
+        self.send_cmd_bin(self.command_set.set_speed_id, s, speed);
     }
 
     fn set_min(&mut self, axis: usize, min_val: i32) {
@@ -569,7 +624,7 @@ impl StepperGUI {
         }
         let axis_idx = axis as i16;
         self.log(&format!(">>> SETTING axis {} min to {} (set_min command)", axis, min_val));
-        self.send_cmd_bin(9, axis_idx, min_val); // set_min is command ID 9, axis: 0=x, 1=z
+        self.send_cmd_bin(self.command_set.set_min_id, axis_idx, min_val);
     }
 
     fn set_max(&mut self, axis: usize, max_val: i32) {
@@ -582,7 +637,7 @@ impl StepperGUI {
         }
         let axis_idx = axis as i16;
         self.log(&format!(">>> SETTING axis {} max to {} (set_max command)", axis, max_val));
-        self.send_cmd_bin(10, axis_idx, max_val); // set_max is command ID 10, axis: 0=x, 1=z
+        self.send_cmd_bin(self.command_set.set_max_id, axis_idx, max_val);
     }
 
     fn connect_tuner(&mut self) {
@@ -614,7 +669,7 @@ impl StepperGUI {
 
     fn refresh_tuner_positions(&mut self) {
         if let Some(ref mut tuner_port) = self.tuner_port {
-            let send = b"1;";
+            let send = self.command_set.positions_cmd;
             let log_msg = format!("TUNER SEND: {:?}", send);
             let _ = tuner_port; // Release borrow before logging
             self.log(&log_msg);
@@ -732,7 +787,7 @@ impl StepperGUI {
             }
             let t = tuner_idx as i16;
             self.log(&format!(">>> MOVING tuner {} by {} (rmove command)", tuner_idx, delta));
-            self.send_cmd_bin_tuner(3, t, delta); // rmove is command ID 3
+            self.send_cmd_bin_tuner(self.tuner_command_set.rmove_id, t, delta);
             thread::sleep(Duration::from_millis(500));
             self.refresh_tuner_positions();
         } else if self.tuner_first_index.is_some() {
@@ -772,7 +827,7 @@ impl StepperGUI {
             }
             let t = tuner_idx as i16;
             self.log(&format!(">>> SETTING tuner {} acceleration to {} (set_accel command)", tuner_idx, accel));
-            self.send_cmd_bin_tuner(7, t, accel); // set_accel is command ID 7
+            self.send_cmd_bin_tuner(self.tuner_command_set.set_accel_id, t, accel);
         } else if self.tuner_first_index.is_some() {
             // Tuners on main board - use main board
             if let Some(tuner_first) = self.tuner_first_index {
@@ -790,7 +845,7 @@ impl StepperGUI {
             }
             let t = tuner_idx as i16;
             self.log(&format!(">>> SETTING tuner {} speed to {} (set_speed command)", tuner_idx, speed));
-            self.send_cmd_bin_tuner(8, t, speed); // set_speed is command ID 8
+            self.send_cmd_bin_tuner(self.tuner_command_set.set_speed_id, t, speed);
         } else if self.tuner_first_index.is_some() {
             // Tuners on main board - use main board
             if let Some(tuner_first) = self.tuner_first_index {
@@ -808,7 +863,7 @@ impl StepperGUI {
             }
             let t = tuner_idx as i16;
             self.log(&format!(">>> SETTING tuner {} min to {} (set_min command)", tuner_idx, min_val));
-            self.send_cmd_bin_tuner(9, t, min_val); // set_min is command ID 9
+            self.send_cmd_bin_tuner(self.tuner_command_set.set_min_id, t, min_val);
         } else if self.tuner_first_index.is_some() {
             // Tuners on main board - use main board
             if let Some(_tuner_first) = self.tuner_first_index {
@@ -825,7 +880,7 @@ impl StepperGUI {
             }
             let t = tuner_idx as i16;
             self.log(&format!(">>> SETTING tuner {} max to {} (set_max command)", tuner_idx, max_val));
-            self.send_cmd_bin_tuner(10, t, max_val); // set_max is command ID 10
+            self.send_cmd_bin_tuner(self.tuner_command_set.set_max_id, t, max_val);
         } else if self.tuner_first_index.is_some() {
             // Tuners on main board - use main board
             if let Some(_tuner_first) = self.tuner_first_index {
@@ -1342,7 +1397,8 @@ fn main() {
         args.debug,
         debug_file,
         z_up_step,
-        z_down_step
+        z_down_step,
+        settings.firmware
     );
     
     // Auto-connect on startup (mirror Python's automatic arduino_init)

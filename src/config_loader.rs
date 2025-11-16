@@ -13,6 +13,22 @@ use gethostname::gethostname;
 
 // -------------------- Arduino (carriage) config --------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArduinoFirmware {
+    StringDriverV1,
+    StringDriverV2,
+}
+
+impl ArduinoFirmware {
+    fn from_value(value: Option<&str>) -> Result<Self> {
+        match value.unwrap_or("string_driver_v2") {
+            "string_driver_v1" => Ok(ArduinoFirmware::StringDriverV1),
+            "string_driver_v2" => Ok(ArduinoFirmware::StringDriverV2),
+            other => Err(anyhow!("Unknown ARDUINO_FIRMWARE value '{}'", other)),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ArduinoSettings {
     pub port: String,
@@ -24,6 +40,7 @@ pub struct ArduinoSettings {
     pub tuner_first_index: Option<usize>, // None means no tuners
     pub ard_t_port: Option<String>, // None means tuners on main board or no tuners
     pub ard_t_num_steppers: Option<usize>, // Number of tuner steppers
+    pub firmware: ArduinoFirmware,
 }
 
 /// Load ARD_PORT and ARD_NUM_STEPPERS for a given hostname from string_driver.yaml.
@@ -97,6 +114,12 @@ pub fn load_arduino_settings(hostname: &str) -> Result<ArduinoSettings> {
         .and_then(|v| v.as_i64())
         .map(|v| v as usize);
 
+    let firmware = ArduinoFirmware::from_value(
+        host_block
+            .get(&serde_yaml::Value::from("ARDUINO_FIRMWARE"))
+            .and_then(|v| v.as_str()),
+    )?;
+
     Ok(ArduinoSettings {
         port: ard_port,
         num_steppers: num,
@@ -107,6 +130,7 @@ pub fn load_arduino_settings(hostname: &str) -> Result<ArduinoSettings> {
         tuner_first_index,
         ard_t_port,
         ard_t_num_steppers,
+        firmware,
     })
 }
 

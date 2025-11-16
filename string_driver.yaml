@@ -99,6 +99,7 @@ RaspberryPi:
     TUNER_FIRST_INDEX: 0
     ARD_NUM_STEPPERS: 13
     ARD_PORT: /dev/ttyACM0
+    ARD_T_NUM_STEPPERS: 2
     ARD_T_NUM_STEPPERS: 6
     ARD_T_PORT: /dev/ttyACM1
     X_MAX_POS: 2600
