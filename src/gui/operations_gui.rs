@@ -792,16 +792,24 @@ impl eframe::App for OperationsGUI {
                         let mut enabled = self.operations.lock().unwrap().get_stepper_enabled(left_idx);
                         let is_bumping = bump_map.get(&left_idx).copied().unwrap_or(false);
                         
-                        let status_indicator = if is_bumping { " 🔴" } else { " ⚪" };
-                        let label = format!("Stepper {} (Z{}){}", 
+                        let label = format!("Stepper {} (Z{})", 
                             left_idx, 
                             left_idx - z_first,
-                            status_indicator);
+                        );
                         
-                        if ui.checkbox(&mut enabled, &label).changed() {
-                            self.operations.lock().unwrap().set_stepper_enabled(left_idx, enabled);
-                            self.append_message(&format!("Stepper {} {}", left_idx, if enabled { "enabled" } else { "disabled" }));
-                        }
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut enabled, &label).changed() {
+                                self.operations.lock().unwrap().set_stepper_enabled(left_idx, enabled);
+                                self.append_message(&format!("Stepper {} {}", left_idx, if enabled { "enabled" } else { "disabled" }));
+                            }
+                            
+                            let dot_color = if is_bumping {
+                                egui::Color32::from_rgb(220, 0, 0)
+                            } else {
+                                egui::Color32::from_gray(120)
+                            };
+                            ui.label(egui::RichText::new("●").color(dot_color));
+                        });
                     });
                     
                     // Right column: "in" stepper (Stepper1)
@@ -809,16 +817,24 @@ impl eframe::App for OperationsGUI {
                         let mut enabled = self.operations.lock().unwrap().get_stepper_enabled(right_idx);
                         let is_bumping = bump_map.get(&right_idx).copied().unwrap_or(false);
                         
-                        let status_indicator = if is_bumping { " 🔴" } else { " ⚪" };
-                        let label = format!("Stepper {} (Z{}){}", 
+                        let label = format!("Stepper {} (Z{})", 
                             right_idx, 
                             right_idx - z_first,
-                            status_indicator);
+                        );
                         
-                        if ui.checkbox(&mut enabled, &label).changed() {
-                            self.operations.lock().unwrap().set_stepper_enabled(right_idx, enabled);
-                            self.append_message(&format!("Stepper {} {}", right_idx, if enabled { "enabled" } else { "disabled" }));
-                        }
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut enabled, &label).changed() {
+                                self.operations.lock().unwrap().set_stepper_enabled(right_idx, enabled);
+                                self.append_message(&format!("Stepper {} {}", right_idx, if enabled { "enabled" } else { "disabled" }));
+                            }
+                            
+                            let dot_color = if is_bumping {
+                                egui::Color32::from_rgb(220, 0, 0)
+                            } else {
+                                egui::Color32::from_gray(120)
+                            };
+                            ui.label(egui::RichText::new("●").color(dot_color));
+                        });
                     });
                 });
             }
