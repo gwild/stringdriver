@@ -808,7 +808,8 @@ impl eframe::App for OperationsGUI {
                             } else {
                                 egui::Color32::from_gray(120)
                             };
-                            ui.label(egui::RichText::new("●").color(dot_color));
+                            let (rect, _) = ui.allocate_exact_size(egui::Vec2::new(14.0, 14.0), egui::Sense::hover());
+                            ui.painter().circle_filled(rect.center(), 5.0, dot_color);
                         });
                     });
                     
@@ -833,7 +834,8 @@ impl eframe::App for OperationsGUI {
                             } else {
                                 egui::Color32::from_gray(120)
                             };
-                            ui.label(egui::RichText::new("●").color(dot_color));
+                            let (rect, _) = ui.allocate_exact_size(egui::Vec2::new(14.0, 14.0), egui::Sense::hover());
+                            ui.painter().circle_filled(rect.center(), 5.0, dot_color);
                         });
                     });
                 });
