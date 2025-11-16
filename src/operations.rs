@@ -712,10 +712,11 @@ impl Operations {
         Ok(messages.join("\n"))
     }
     
-    /// Z-calibrate: Move Z steppers down until they touch sensors, then reset to 0.
+    /// Z-calibrate: Move Z steppers down until they touch sensors.
     /// 
     /// This function calibrates Z-steppers by moving them down until they contact
-    /// the touch sensors, then resets their position to 0.
+    /// the touch sensors and leave them at the contact point so a subsequent
+    /// bump_check pass can retract them by z_up_step.
     /// 
     /// Args:
     /// - stepper_ops: Trait object for performing stepper operations
@@ -808,15 +809,10 @@ impl Operations {
                 
                 // Check if we've hit minimum position BEFORE moving
                 if pos_local <= min_pos {
-                    messages.push(format!("Stepper {} bottomed out during calibration (reached min_pos {} without touching) - disabling and setting to max_pos {}", stepper_idx, min_pos, max_pos));
+                    messages.push(format!("Stepper {} bottomed out during calibration (reached min_pos {} without touching) - disabling and leaving at current position", stepper_idx, min_pos));
                     // Disable the stepper since it can't reach the sensor
                     self.set_stepper_enabled(stepper_idx, false);
                     stepper_ops.disable(stepper_idx)?;
-                    // Set to max_pos (not 0) since it started at max_pos
-                    stepper_ops.reset(stepper_idx, max_pos)?;
-                    if let Some(pos) = positions.get_mut(stepper_idx) {
-                        *pos = max_pos;
-                    }
                     break;
                 }
                 
@@ -832,12 +828,7 @@ impl Operations {
             }
             
             if touched {
-                // Reset to 0 (like surfer.py's set_stepper to 0)
-                stepper_ops.reset(stepper_idx, 0)?;
-                if let Some(pos) = positions.get_mut(stepper_idx) {
-                    *pos = 0;
-                }
-                messages.push(format!("Stepper {} calibrated (touched sensor, reset to 0)", stepper_idx));
+                messages.push(format!("Stepper {} calibrated (touched sensor, left at contact position)", stepper_idx));
             } else {
                 messages.push(format!("Stepper {} calibration incomplete", stepper_idx));
             }
