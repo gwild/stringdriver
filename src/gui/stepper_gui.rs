@@ -155,7 +155,7 @@ impl StepperGUI {
                 if parts.len() == 3 {
                     if let (Ok(stepper), Ok(delta)) = (parts[1].parse::<usize>(), parts[2].parse::<i32>()) {
                         self.log(&format!("IPC: rel_move {} {}", stepper, delta));
-                        self.move_stepper(stepper, delta);
+                        self.move_stepper_ipc(stepper, delta);
                     }
                 }
             }
@@ -474,6 +474,14 @@ impl StepperGUI {
     }
 
     fn move_stepper(&mut self, stepper: usize, delta: i32) {
+        self.move_stepper_with_source("UI", stepper, delta);
+    }
+
+    fn move_stepper_ipc(&mut self, stepper: usize, delta: i32) {
+        self.move_stepper_with_source("IPC", stepper, delta);
+    }
+
+    fn move_stepper_with_source(&mut self, source: &str, stepper: usize, delta: i32) {
         if self.port.is_none() {
             self.log(&format!("ERROR: Cannot move - port not connected"));
             return;
@@ -483,7 +491,7 @@ impl StepperGUI {
             let _ = p.clear(serialport::ClearBuffer::Input);
         }
         let s = stepper as i16;
-        self.log(&format!(">>> MOVING stepper {} by {} (rmove command)", stepper, delta));
+        self.log(&format!(">>> {} MOVING stepper {} by {} (rmove command)", source, stepper, delta));
         self.send_cmd_bin(3, s, delta); // rmove is command ID 3, format "il"
         self.log(&format!("Command sent, waiting for Arduino..."));
         // Arduino move is synchronous - wait for it to complete
@@ -1255,9 +1263,15 @@ impl eframe::App for StepperGUI {
                 }
             });
             ui.collapsing("Debug log", |ui| {
-                if ui.button("Clear log").clicked() { 
-                    self.debug_log.clear(); 
-                }
+                ui.horizontal(|ui| {
+                    if ui.button("Clear log").clicked() {
+                        self.debug_log.clear();
+                    }
+                    if ui.button("Copy log").clicked() {
+                        let log = self.debug_log.clone();
+                        ui.output_mut(|o| o.copied_text = log);
+                    }
+                });
                 egui::ScrollArea::vertical()
                     .max_height(400.0)
                     .auto_shrink([false; 2])
@@ -1266,7 +1280,8 @@ impl eframe::App for StepperGUI {
                         ui.add(
                             egui::TextEdit::multiline(&mut self.debug_log)
                                 .desired_width(f32::INFINITY)
-                                .interactive(false)
+                                .interactive(true)
+                                .code_editor()
                         );
                     });
             });

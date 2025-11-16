@@ -77,6 +77,7 @@ impl ArduinoStepperOps {
         
         let cmd_with_newline = format!("{}
 ", cmd);
+        println!("Stepper IPC command: {}", cmd);
         match self.ensure_stream() {
             Ok(stream) => {
                 if let Err(e) = stream.write_all(cmd_with_newline.as_bytes()) {
@@ -942,6 +943,12 @@ impl eframe::App for OperationsGUI {
             
             // Display messages (debug log style)
             ui.collapsing("Messages", |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Copy log").clicked() {
+                        let log = self.message.clone();
+                        ui.output_mut(|o| o.copied_text = log);
+                    }
+                });
                 egui::ScrollArea::vertical()
                     .max_height(400.0)
                     .auto_shrink([false; 2])
@@ -950,7 +957,8 @@ impl eframe::App for OperationsGUI {
                         ui.add(
                             egui::TextEdit::multiline(&mut self.message)
                                 .desired_width(f32::INFINITY)
-                                .interactive(false)
+                                .interactive(true)
+                                .code_editor()
                         );
                     });
             });
