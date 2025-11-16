@@ -574,6 +574,10 @@ impl Operations {
             return Ok("\nno GPIO".to_string());
         }
 
+        if !self.get_bump_check_enable() {
+            return Ok("bump_check disabled - skipping".to_string());
+        }
+
         let z_up_step = self.get_z_up_step();
         if z_up_step <= 0 {
             return Err(anyhow!(
@@ -732,14 +736,16 @@ impl Operations {
             return Ok("Z-Calibration requires GPIO".to_string());
         }
         
-        // Temporarily disable bump_check (like surfer.py does)
-        let original_bump_check = self.get_bump_check_enable();
-        self.set_bump_check_enable(false);
+        let mut messages = Vec::new();
+        messages.push("Running bump_check before Z calibration...".to_string());
+        let bump_msg_initial = self.bump_check(None, positions, max_positions, stepper_ops, exit_flag)?;
+        if !bump_msg_initial.trim().is_empty() {
+            messages.push(bump_msg_initial);
+        }
         
         let z_indices = self.get_z_stepper_indices();
         let enabled_states = self.get_all_stepper_enabled();
         let z_down_step = self.get_z_down_step();
-        let mut messages = Vec::new();
         
         messages.push("Starting Z calibration...".to_string());
         
@@ -749,8 +755,6 @@ impl Operations {
             if let Some(exit) = exit_flag {
                 if exit.load(std::sync::atomic::Ordering::Relaxed) {
                     messages.push("Calibration cancelled".to_string());
-                    // Restore bump_check state before returning
-                    self.set_bump_check_enable(original_bump_check);
                     return Ok(messages.join("\n"));
                 }
             }
@@ -895,12 +899,6 @@ impl Operations {
             messages.push(format!("Bump check iteration {} - still clearing steppers", iterations));
         }
         
-        // Re-enable bump_check if it was previously enabled
-        self.set_bump_check_enable(original_bump_check);
-        if original_bump_check {
-            messages.push("Bump check re-enabled".to_string());
-        }
-        
         Ok(messages.join("\n"))
     }
     
@@ -924,6 +922,7 @@ impl Operations {
         &self,
         stepper_ops: &mut T,
         positions: &mut [i32],
+        max_positions: &HashMap<usize, i32>,
         min_thresholds: &[f32],
         max_thresholds: &[f32],
         min_voices: &[usize],
@@ -936,6 +935,12 @@ impl Operations {
         let amp_sums = self.get_amp_sum();
         let voice_counts = self.get_voice_count();
         let mut messages = Vec::new();
+        
+        messages.push("Running bump_check before Z adjustment...".to_string());
+        let bump_msg_initial = self.bump_check(None, positions, max_positions, stepper_ops, exit_flag)?;
+        if !bump_msg_initial.trim().is_empty() {
+            messages.push(bump_msg_initial);
+        }
         
         messages.push("Starting Z adjustment...".to_string());
         
@@ -1032,6 +1037,7 @@ impl Operations {
                         "String {}: too close (amp={:.2}, voices={}), moved stepper {} (closest) up by {}",
                         string_idx, amp_sum, voice_count, stepper_to_move, z_up_step
                     ));
+                    self.rest_lap();
                 } else {
                     // Move stepper down (toward string)
                     self.rel_move_z(stepper_ops, stepper_to_move, z_down_step)?;
@@ -1042,6 +1048,7 @@ impl Operations {
                         "String {}: too far (amp={:.2}, voices={}), moved stepper {} (farthest) down by {}",
                         string_idx, amp_sum, voice_count, stepper_to_move, z_down_step
                     ));
+                    self.rest_lap();
                 }
             } else {
                 messages.push(format!(
@@ -1051,6 +1058,11 @@ impl Operations {
             }
         }
         
+        messages.push("Running bump_check after Z adjustment...".to_string());
+        let bump_msg_final = self.bump_check(None, positions, max_positions, stepper_ops, exit_flag)?;
+        if !bump_msg_final.trim().is_empty() {
+            messages.push(bump_msg_final);
+        }
         messages.push("Z adjustment complete".to_string());
         Ok(messages.join("\n"))
     }

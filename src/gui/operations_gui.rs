@@ -18,7 +18,7 @@ use anyhow::Result;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 use uuid::Uuid;
@@ -150,6 +150,7 @@ struct OperationsGUI {
     operation_running: Arc<AtomicBool>,
     operation_task: Option<OperationTask>,
     repeat_enabled: bool,
+    repeat_pending: Option<(String, Instant)>,
     // Machine state logging
     logging_enabled: bool,
     logger: Option<machine_state_logger::MachineStateLoggingContext>,
@@ -305,6 +306,7 @@ impl OperationsGUI {
             amp_sum_max,
             stepper_positions,
             repeat_enabled: false,
+            repeat_pending: None,
             logging_enabled: logger.is_some(),
             logger,
         })
@@ -320,7 +322,7 @@ impl OperationsGUI {
     
     fn poll_operation_result(&mut self) {
         let mut should_clear = false;
-        let mut restart_operation: Option<String> = None;
+        let mut schedule_repeat_op: Option<String> = None;
         if let Some(task) = self.operation_task.as_mut() {
             match task.receiver.try_recv() {
                 Ok(result) => {
@@ -331,7 +333,7 @@ impl OperationsGUI {
                     self.operation_running.store(false, std::sync::atomic::Ordering::Relaxed);
                     should_clear = true;
                     if self.repeat_enabled && self.selected_operation == result.operation {
-                        restart_operation = Some(result.operation.clone());
+                        schedule_repeat_op = Some(result.operation.clone());
                     }
                 }
                 Err(TryRecvError::Empty) => {}
@@ -347,12 +349,25 @@ impl OperationsGUI {
             self.operation_task = None;
         }
 
-        if let Some(op) = restart_operation {
+        if let Some(op) = schedule_repeat_op {
             if self.repeat_enabled {
-                self.append_message(&format!("Repeat enabled - re-running {}", op));
-                self.start_operation(op);
+                let lap_rest = self.operations.lock().unwrap().get_lap_rest().max(0.0);
+                let wait = if lap_rest <= 0.0 {
+                    Duration::from_secs(0)
+                } else {
+                    Duration::from_secs_f32(lap_rest)
+                };
+                let deadline = Instant::now() + wait;
+                self.repeat_pending = Some((op.clone(), deadline));
+                self.append_message(&format!(
+                    "Repeat enabled - waiting {:.2}s before re-running {}",
+                    lap_rest,
+                    op
+                ));
             }
         }
+
+        self.try_start_scheduled_repeat();
     }
 
 
@@ -377,6 +392,22 @@ impl OperationsGUI {
         }
 
         self.start_operation(selected_operation);
+    }
+
+    fn try_start_scheduled_repeat(&mut self) {
+        if self.repeat_pending.is_none() {
+            return;
+        }
+        if self.operation_running.load(std::sync::atomic::Ordering::Relaxed) || self.operation_task.is_some() {
+            return;
+        }
+        if let Some((op_name, deadline)) = self.repeat_pending.clone() {
+            if Instant::now() >= deadline {
+                self.repeat_pending = None;
+                self.append_message(&format!("Repeat interval elapsed - re-running {}", op_name));
+                self.start_operation(op_name);
+            }
+        }
     }
 
     fn start_operation(&mut self, operation: String) {
@@ -462,6 +493,7 @@ impl OperationsGUI {
                     "z_adjust" => ops_guard.z_adjust(
                         &mut *stepper_client,
                         &mut local_positions,
+                        &max_positions,
                         &min_thresholds,
                         &max_thresholds,
                         &min_voices,
@@ -629,6 +661,19 @@ impl eframe::App for OperationsGUI {
             
             // Adjustment parameters
             ui.heading("Adjustment Parameters");
+            
+            ui.horizontal(|ui| {
+                let current_enabled = self.operations.lock().unwrap().get_bump_check_enable();
+                let mut bump_enabled = current_enabled;
+                if ui.checkbox(&mut bump_enabled, "Bump check enabled").changed() {
+                    self.operations.lock().unwrap().set_bump_check_enable(bump_enabled);
+                    self.append_message(&format!("Bump check {}", if bump_enabled { "enabled" } else { "disabled" }));
+                    if !bump_enabled {
+                        self.repeat_pending = None;
+                    }
+                }
+                ui.label("When off, bump_check commands just report pass");
+            });
             
             ui.horizontal(|ui| {
                 ui.label("Adjustment Level:");
@@ -959,9 +1004,16 @@ impl eframe::App for OperationsGUI {
                 
                 ui.horizontal(|ui| {
                     if ui.button("Execute").clicked() {
+                        self.repeat_pending = None;
                         self.execute_operation();
                     }
-                    ui.checkbox(&mut self.repeat_enabled, "Repeat");
+                    let mut repeat_flag = self.repeat_enabled;
+                    if ui.checkbox(&mut repeat_flag, "Repeat").changed() {
+                        self.repeat_enabled = repeat_flag;
+                        if !repeat_flag {
+                            self.repeat_pending = None;
+                        }
+                    }
                     if ui.button("KILL ALL").clicked() {
                         self.kill_all();
                     }
