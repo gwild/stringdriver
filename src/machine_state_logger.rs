@@ -106,10 +106,12 @@ impl MachineStateLogger {
     }
 
     fn insert_machine_state(&mut self, snapshot: &MachineStateSnapshot) -> Result<()> {
-        let state_id_str = snapshot.state_id.to_string();
-        let controls_id_str = snapshot.controls_id.map(|id| id.to_string());
+        let controls_id_text = snapshot.controls_id.map(|id| id.to_string());
         self.client.execute(&self.insert_state_stmt, &[
-            &state_id_str, &controls_id_str, &snapshot.host, &snapshot.recorded_at,
+            &snapshot.state_id,
+            &controls_id_text,
+            &snapshot.host,
+            &snapshot.recorded_at,
             &snapshot.stepper_positions, &snapshot.stepper_enabled,
             &snapshot.bump_check_enable, &(snapshot.z_up_step as i32), &(snapshot.z_down_step as i32),
             &(snapshot.tune_rest as f32), &(snapshot.x_rest as f32), &(snapshot.z_rest as f32), &(snapshot.lap_rest as f32),
@@ -122,11 +124,12 @@ impl MachineStateLogger {
     }
 
     fn insert_operation(&mut self, event: &OperationEvent) -> Result<()> {
-        let operation_id_str = event.operation_id.to_string();
-        let state_id_str = event.state_id.map(|id| id.to_string());
         let stepper_indices_array: Vec<i32> = event.stepper_indices.iter().map(|&x| x as i32).collect();
         self.client.execute(&self.insert_operation_stmt, &[
-            &operation_id_str, &state_id_str, &event.host, &event.recorded_at,
+            &event.operation_id,
+            &event.state_id,
+            &event.host,
+            &event.recorded_at,
             &event.operation_type, &event.operation_status, &event.message,
             &stepper_indices_array, &event.final_positions,
         ]).context("Failed to insert operation record.")?;
