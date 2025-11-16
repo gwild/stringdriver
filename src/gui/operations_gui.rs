@@ -16,8 +16,9 @@ mod machine_state_logger;
 use eframe::egui;
 use anyhow::Result;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 use uuid::Uuid;
@@ -32,6 +33,7 @@ type PartialsSlot = Arc<Mutex<Option<get_results::PartialsData>>>;
 struct ArduinoStepperOps {
     socket_path: String,
     stream: Option<UnixStream>,
+    connected_once: bool,
 }
 
 impl ArduinoStepperOps {
@@ -39,26 +41,49 @@ impl ArduinoStepperOps {
         // Generate socket path the same way as stepper_gui.rs
         let port_id = port_path.replace("/", "_").replace("\\", "_");
         let socket_path = format!("/tmp/stepper_gui_{}.sock", port_id);
-        Self { socket_path, stream: None }
+        println!("Initializing shared stepper socket target at {}", socket_path);
+        Self {
+            socket_path,
+            stream: None,
+            connected_once: false,
+        }
     }
     
     fn ensure_stream(&mut self) -> Result<&mut UnixStream> {
         if self.stream.is_none() {
+            if self.connected_once {
+                println!(
+                    "Stepper socket connection dropped; attempting reconnect to {}",
+                    self.socket_path
+                );
+            } else {
+                println!("Connecting to stepper socket {}", self.socket_path);
+            }
             let stream = UnixStream::connect(&self.socket_path)
                 .map_err(|e| anyhow::anyhow!("Failed to connect to stepper_gui socket at {}: {}", self.socket_path, e))?;
+            println!(
+                "Stepper socket {} connection {}",
+                self.socket_path,
+                if self.connected_once { "re-established" } else { "established" }
+            );
             self.stream = Some(stream);
+            self.connected_once = true;
         }
         Ok(self.stream.as_mut().unwrap())
     }
-    
     /// Send a text command to stepper_gui via Unix socket
     fn send_command(&mut self, cmd: &str) -> Result<()> {
         use std::io::Write;
         
-        let cmd_with_newline = format!("{}\n", cmd);
+        let cmd_with_newline = format!("{}
+", cmd);
         match self.ensure_stream() {
             Ok(stream) => {
                 if let Err(e) = stream.write_all(cmd_with_newline.as_bytes()) {
+                    println!(
+                        "Stepper socket write failed ({}). Resetting connection to {}",
+                        e, self.socket_path
+                    );
                     // Connection probably dropped; try once more by reconnecting.
                     self.stream = None;
                     let stream = self.ensure_stream()?;
@@ -110,7 +135,7 @@ struct OperationsGUI {
     message: String,
     partials_slot: PartialsSlot,
     selected_operation: String,
-    arduino_ops: Option<ArduinoStepperOps>,
+    arduino_ops: Option<Arc<Mutex<ArduinoStepperOps>>>,
     // Thresholds for z_adjust operation
     voice_count_min: Vec<i32>,  // Per-channel minimum voice count
     voice_count_max: Vec<i32>,  // Per-channel maximum voice count
@@ -122,9 +147,19 @@ struct OperationsGUI {
     exit_flag: Arc<AtomicBool>,
     // Operation lock to prevent concurrent execution
     operation_running: Arc<AtomicBool>,
+    operation_task: Option<OperationTask>,
     // Machine state logging
     logging_enabled: bool,
     logger: Option<machine_state_logger::MachineStateLoggingContext>,
+}
+
+struct OperationTask {
+    receiver: Receiver<OperationResult>,
+}
+
+struct OperationResult {
+    message: String,
+    updated_positions: std::collections::HashMap<usize, i32>,
 }
 
 impl OperationsGUI {
@@ -143,7 +178,7 @@ impl OperationsGUI {
         let operations = Arc::new(Mutex::new(operations::Operations::new_with_partials_slot(Some(Arc::clone(&partials_slot)))?));
         
         // Create Arduino stepper operations client (connects via IPC to stepper_gui's connection)
-        let arduino_ops = ArduinoStepperOps::new(&port_path);
+        let arduino_ops = Arc::new(Mutex::new(ArduinoStepperOps::new(&port_path)));
         
         // Spawn a thread to periodically update the partials slot from shared memory
         let partials_slot_thread = Arc::clone(&partials_slot);
@@ -257,6 +292,7 @@ impl OperationsGUI {
             message: String::new(),
             exit_flag: Arc::new(AtomicBool::new(false)),
             operation_running: Arc::new(AtomicBool::new(false)),
+            operation_task: None,
             partials_slot,
             selected_operation: "None".to_string(),
             arduino_ops: Some(arduino_ops),
@@ -278,138 +314,171 @@ impl OperationsGUI {
         self.message.push_str(msg);
     }
     
+    fn poll_operation_result(&mut self) {
+        let mut should_clear = false;
+        if let Some(task) = self.operation_task.as_mut() {
+            match task.receiver.try_recv() {
+                Ok(result) => {
+                    for (idx, pos) in result.updated_positions {
+                        self.stepper_positions.insert(idx, pos);
+                    }
+                    self.append_message(&result.message);
+                    self.operation_running.store(false, std::sync::atomic::Ordering::Relaxed);
+                    should_clear = true;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    self.append_message("Operation worker disconnected unexpectedly");
+                    self.operation_running.store(false, std::sync::atomic::Ordering::Relaxed);
+                    should_clear = true;
+                }
+            }
+        }
+
+        if should_clear {
+            self.operation_task = None;
+        }
+    }
+    
     /// Execute the selected operation
     fn execute_operation(&mut self) {
-        // Prevent concurrent operations
         if self.operation_running.load(std::sync::atomic::Ordering::Relaxed) {
             self.append_message("Operation already running - please wait");
             return;
         }
-        
-        // Check if arduino_ops is available first
-        if self.arduino_ops.is_none() {
-            self.append_message("Arduino connection client not available");
+
+        self.poll_operation_result();
+
+        if self.operation_task.is_some() {
+            self.append_message("Operation still completing - please wait");
             return;
         }
-        
-        // Set operation running flag
-        self.operation_running.store(true, std::sync::atomic::Ordering::Relaxed);
-        
-        // Get current positions - use tracked positions, defaulting to 0
+
+        let arduino_ops = match self.arduino_ops.as_ref() {
+            Some(ops) => Arc::clone(ops),
+            None => {
+                self.append_message("Arduino connection client not available");
+                return;
+            }
+        };
+
         let z_indices = self.operations.lock().unwrap().get_z_stepper_indices();
+        if z_indices.is_empty() {
+            self.append_message("No Z steppers configured");
+            return;
+        }
+
+        let selected_operation = self.selected_operation.clone();
+        match selected_operation.as_str() {
+            "z_calibrate" => self.append_message("Executing Z Calibrate..."),
+            "z_adjust" => self.append_message("Executing Z Adjust..."),
+            "bump_check" => self.append_message("Executing Bump Check..."),
+            _ => self.append_message("No operation selected"),
+        }
+
+        if selected_operation == "None" {
+            return;
+        }
+
         let max_idx = z_indices.iter().max().copied().unwrap_or(0);
         let mut positions = vec![0i32; max_idx + 1];
         for &idx in &z_indices {
-            positions[idx] = self.stepper_positions.get(&idx).copied().unwrap_or(0);
+            if idx < positions.len() {
+                positions[idx] = self.stepper_positions.get(&idx).copied().unwrap_or(0);
+            }
         }
         let mut max_positions = std::collections::HashMap::new();
         for &idx in &z_indices {
-            max_positions.insert(idx, 100); // Default max position
+            max_positions.insert(idx, 100);
         }
-        
-        match self.selected_operation.as_str() {
-            "z_calibrate" => {
-                self.append_message("Executing Z Calibrate...");
-                let result = {
-                    let stepper_ops = self.arduino_ops.as_mut().unwrap();
-                    self.operations.lock().unwrap().z_calibrate(
-                        stepper_ops,
-                        &mut positions,
-                        &max_positions,
-                        Some(&self.exit_flag),
-                    )
+
+        let min_thresholds: Vec<f32> = self.amp_sum_min.iter().map(|&v| v as f32).collect();
+        let max_thresholds: Vec<f32> = self.amp_sum_max.iter().map(|&v| v as f32).collect();
+        let min_voices: Vec<usize> = self.voice_count_min.iter().map(|&v| v.max(0) as usize).collect();
+        let max_voices: Vec<usize> = self.voice_count_max.iter().map(|&v| v.max(0) as usize).collect();
+
+        let operations = Arc::clone(&self.operations);
+        let exit_flag = Arc::clone(&self.exit_flag);
+        let z_indices_clone = z_indices.clone();
+
+        let (tx, rx) = mpsc::channel();
+        self.operation_task = Some(OperationTask { receiver: rx });
+        self.operation_running.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        thread::spawn(move || {
+            let mut local_positions = positions;
+            let operation_result = {
+                let mut stepper_client = match arduino_ops.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        let _ = tx.send(OperationResult {
+                            message: "Error: Arduino client lock poisoned".to_string(),
+                            updated_positions: std::collections::HashMap::new(),
+                        });
+                        return;
+                    }
                 };
-                match result {
-                    Ok(msg) => {
-                        // Update tracked positions
-                        for &idx in &z_indices {
-                            if idx < positions.len() {
-                                self.stepper_positions.insert(idx, positions[idx]);
-                            }
-                        }
-                        self.append_message(&msg);
+                let mut ops_guard = match operations.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        let _ = tx.send(OperationResult {
+                            message: "Error: Operations lock poisoned".to_string(),
+                            updated_positions: std::collections::HashMap::new(),
+                        });
+                        return;
                     }
-                    Err(e) => {
-                        self.append_message(&format!("Error: {}", e));
-                    }
-                }
-            }
-            "z_adjust" => {
-                self.append_message("Executing Z Adjust...");
-                let min_thresholds: Vec<f32> = self.amp_sum_min.iter().map(|&v| v as f32).collect();
-                let max_thresholds: Vec<f32> = self.amp_sum_max.iter().map(|&v| v as f32).collect();
-                let min_voices: Vec<usize> = self.voice_count_min.iter().map(|&v| v.max(0) as usize).collect();
-                let max_voices: Vec<usize> = self.voice_count_max.iter().map(|&v| v.max(0) as usize).collect();
-                
-                let result = {
-                    let stepper_ops = self.arduino_ops.as_mut().unwrap();
-                    self.operations.lock().unwrap().z_adjust(
-                        stepper_ops,
-                        &mut positions,
+                };
+
+                match selected_operation.as_str() {
+                    "z_calibrate" => ops_guard.z_calibrate(&mut *stepper_client, &mut local_positions, &max_positions, Some(&exit_flag)),
+                    "z_adjust" => ops_guard.z_adjust(
+                        &mut *stepper_client,
+                        &mut local_positions,
                         &min_thresholds,
                         &max_thresholds,
                         &min_voices,
                         &max_voices,
-                        Some(&self.exit_flag),
-                    )
-                };
-                match result {
-                    Ok(msg) => {
-                        // Update tracked positions after z_adjust (handles negative positions)
-                        for &idx in &z_indices {
-                            if idx < positions.len() {
-                                self.stepper_positions.insert(idx, positions[idx]);
-                            }
-                        }
-                        self.append_message(&msg);
-                    }
-                    Err(e) => {
-                        self.append_message(&format!("Error: {}", e));
-                    }
-                }
-            }
-            "bump_check" => {
-                self.append_message("Executing Bump Check...");
-                if z_indices.is_empty() {
-                    self.append_message("No Z steppers configured");
-                    self.operation_running.store(false, std::sync::atomic::Ordering::Relaxed);
-                    return;
-                }
-                let result = {
-                    let stepper_ops = self.arduino_ops.as_mut().unwrap();
-                    self.operations.lock().unwrap().bump_check(
+                        Some(&exit_flag),
+                    ),
+                    "bump_check" => ops_guard.bump_check(
                         None,
-                        &mut positions,
+                        &mut local_positions,
                         &max_positions,
-                        stepper_ops,
-                        Some(&self.exit_flag),
-                    )
-                };
-                match result {
+                        &mut *stepper_client,
+                        Some(&exit_flag),
+                    ),
+                    _ => Err(anyhow::anyhow!("Unsupported operation")),
+                }
+            };
+
+            let message = match selected_operation.as_str() {
+                "bump_check" => match operation_result {
                     Ok(msg) => {
-                        for &idx in &z_indices {
-                            if idx < positions.len() {
-                                self.stepper_positions.insert(idx, positions[idx]);
-                            }
-                        }
                         if msg.trim().is_empty() {
-                            self.append_message("Bump check complete (no bumps detected).");
+                            "Bump check complete (no bumps detected).".to_string()
                         } else {
-                            self.append_message(&msg);
+                            msg
                         }
                     }
-                    Err(e) => self.append_message(&format!("Bump check error: {}", e)),
+                    Err(e) => format!("Bump check error: {}", e),
+                },
+                _ => match operation_result {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Error: {}", e),
+                },
+            };
+
+            let mut updated_positions = std::collections::HashMap::new();
+            for &idx in &z_indices_clone {
+                if idx < local_positions.len() {
+                    updated_positions.insert(idx, local_positions[idx]);
                 }
             }
-            _ => {
-                self.append_message("No operation selected");
-            }
-        }
-        
-        // Clear operation running flag
-        self.operation_running.store(false, std::sync::atomic::Ordering::Relaxed);
+
+            let _ = tx.send(OperationResult { message, updated_positions });
+        });
     }
-    
+
     /// Kill all processes and close GUI
     fn kill_all(&mut self) {
         self.append_message("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -501,6 +570,9 @@ impl eframe::App for OperationsGUI {
         
         // Request continuous repaints for smooth meter updates
         ctx.request_repaint_after(Duration::from_millis(16)); // ~60 Hz update rate
+        
+        // Poll for any finished background operations before rendering
+        self.poll_operation_result();
         
         // Update audio analysis from partials slot using get_results module
         let partials = get_results::read_partials_from_slot(&self.partials_slot);
