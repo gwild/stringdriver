@@ -61,6 +61,7 @@ RaspberryPi:
     DB_TABLE: RND
     GPIO_ENABLED: true
     GPIO_LIBRARY: gpiod
+    ARDUINO_FIRMWARE: string_driver_v2
     GPIO_COMPONENTS:
       Z_TOUCH_PINS: [8, 17, 18, 27, 10, 13, 24, 21] # 8 pins for 4 strings
     GPIO_MAX_STEPS: 1550 # For guitar setup
@@ -84,6 +85,7 @@ RaspberryPi:
     DB_TABLE: data_2024
     GPIO_ENABLED: true
     GPIO_LIBRARY: gpiod
+    ARDUINO_FIRMWARE: string_driver_v2
     GPIO_COMPONENTS:
       Z_TOUCH_PINS: [8, 17, 18, 27, 10, 13, 24, 21, 5, 19, 11, 20] # 12 pins
       X_HOME_PIN: 16
@@ -111,6 +113,7 @@ RaspberryPi:
     DB_TABLE: data_2022
     GPIO_ENABLED: true
     GPIO_LIBRARY: gpiod
+    ARDUINO_FIRMWARE: string_driver_v1
     GPIO_COMPONENTS:
       Z_TOUCH_PINS: [6, 26, 19, 5]
       X_LIMIT_PIN: 16
