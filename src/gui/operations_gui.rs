@@ -671,7 +671,17 @@ impl eframe::App for OperationsGUI {
                 }
 
                 ui.add_space(16.0);
-                if ui.button("EXIT").clicked() {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("EXIT")
+                                .color(egui::Color32::from_rgb(220, 32, 32))
+                                .strong(),
+                        )
+                        .min_size(egui::vec2(70.0, 28.0)),
+                    )
+                    .clicked()
+                {
                     self.kill_all();
                 }
             });
@@ -1032,9 +1042,6 @@ impl eframe::App for OperationsGUI {
                         if !repeat_flag {
                             self.repeat_pending = None;
                         }
-                    }
-                    if ui.button("KILL ALL").clicked() {
-                        self.kill_all();
                     }
                 });
             });
