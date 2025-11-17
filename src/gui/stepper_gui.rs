@@ -664,6 +664,7 @@ impl StepperGUI {
             // Tuners on main board - positions come from main board
             self.log("Tuners on main board - using main positions");
             self.tuner_connected = true;
+            self.refresh_tuner_positions();
         }
     }
 
@@ -1385,6 +1386,15 @@ fn main() {
     let z_up_step = ops_settings.z_up_step.unwrap_or(2);
     let z_down_step = ops_settings.z_down_step.unwrap_or(-2);
 
+    let mainboard_tuner_count = config_loader::mainboard_tuner_indices(&settings).len();
+    let tuner_num_for_gui = if settings.ard_t_num_steppers.is_some() {
+        settings.ard_t_num_steppers
+    } else if mainboard_tuner_count > 0 {
+        Some(mainboard_tuner_count)
+    } else {
+        None
+    };
+
     let mut app = StepperGUI::new(
         settings.port.clone(),
         settings.num_steppers,
@@ -1393,7 +1403,7 @@ fn main() {
         settings.z_first_index,
         settings.tuner_first_index,
         settings.ard_t_port.clone(),
-        settings.ard_t_num_steppers,
+        tuner_num_for_gui,
         args.debug,
         debug_file,
         z_up_step,
