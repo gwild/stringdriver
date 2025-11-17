@@ -834,7 +834,11 @@ impl Operations {
             }
             
             if touched {
-                messages.push(format!("Stepper {} calibrated (touched sensor, left at contact position)", stepper_idx));
+                stepper_ops.reset(stepper_idx, 0)?;
+                if let Some(pos) = positions.get_mut(stepper_idx) {
+                    *pos = 0;
+                }
+                messages.push(format!("Stepper {} calibrated (touched sensor, reset to 0)", stepper_idx));
             } else {
                 messages.push(format!("Stepper {} calibration incomplete", stepper_idx));
             }
