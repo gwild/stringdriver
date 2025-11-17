@@ -15,6 +15,7 @@ mod machine_state_logger;
 
 use eframe::egui;
 use anyhow::Result;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock, atomic::AtomicBool};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
@@ -293,6 +294,11 @@ impl OperationsGUI {
             }
         }
         
+        let stepper_roles_metadata = Arc::new({
+            let ops_guard = operations.read().unwrap();
+            derive_stepper_roles(&ops_guard, ard_settings.num_steppers)
+        });
+
         // Periodically sync stepper positions from stepper_gui (1 Hz) so logger sees live data
         if let Ok(ops_guard) = arduino_ops.lock() {
             let socket_path_for_poll = ops_guard.socket_path();
@@ -340,6 +346,7 @@ impl OperationsGUI {
             let amp_sum_max_clone = Arc::new(Mutex::new(amp_sum_max.clone()));
             let hostname_clone = hostname.clone();
             let total_steppers = ard_settings.num_steppers;
+            let stepper_roles_clone_for_logger = Arc::clone(&stepper_roles_metadata);
             thread::spawn(move || {
                 use std::time::Instant;
                 let mut last_log = Instant::now();
@@ -391,6 +398,7 @@ impl OperationsGUI {
                                     voice_count_max: vc_max.clone(),
                                     amp_sum_min: amp_min.clone(),
                                     amp_sum_max: amp_max.clone(),
+                                    stepper_roles: (*stepper_roles_clone_for_logger).clone(),
                                 };
                                 logger_clone.insert_machine_state(&snapshot);
                             }
@@ -1202,6 +1210,49 @@ impl eframe::App for OperationsGUI {
             });
         });
     }
+}
+
+fn derive_stepper_roles(ops: &operations::Operations, total_steppers: usize) -> Vec<machine_state_logger::StepperRoleEntry> {
+    let mut roles = Vec::new();
+    let mut seen = HashSet::new();
+
+    let mut push_entry = |idx: usize, role: &str, string_index: Option<usize>| {
+        if idx < total_steppers && seen.insert(idx) {
+            roles.push(machine_state_logger::StepperRoleEntry {
+                stepper_index: idx,
+                role: role.to_string(),
+                string_index,
+            });
+        }
+    };
+
+    for string_idx in 0..ops.string_num {
+        let z_in_idx = ops.z_first_index + (string_idx * 2);
+        let z_out_idx = z_in_idx + 1;
+        push_entry(z_in_idx, "z_in", Some(string_idx));
+        push_entry(z_out_idx, "z_out", Some(string_idx));
+    }
+
+    if let Some(x_idx) = ops.x_step_index() {
+        push_entry(x_idx, "x_axis", None);
+    }
+
+    for (t_idx, step_idx) in ops.tuner_indices().iter().enumerate() {
+        push_entry(*step_idx, "tuner", Some(t_idx));
+    }
+
+    for idx in 0..total_steppers {
+        if !seen.contains(&idx) {
+            roles.push(machine_state_logger::StepperRoleEntry {
+                stepper_index: idx,
+                role: "other".to_string(),
+                string_index: None,
+            });
+        }
+    }
+
+    roles.sort_by_key(|entry| entry.stepper_index);
+    roles
 }
 
 fn main() {

@@ -58,6 +58,7 @@ pub struct MachineStateSnapshot {
     pub voice_count_max: Vec<i32>,
     pub amp_sum_min: Vec<i32>,
     pub amp_sum_max: Vec<i32>,
+    pub stepper_roles: Vec<StepperRoleEntry>,
 }
 
 #[derive(Clone)]
@@ -73,10 +74,18 @@ pub struct OperationEvent {
     pub final_positions: Vec<i32>,
 }
 
+#[derive(Clone)]
+pub struct StepperRoleEntry {
+    pub stepper_index: usize,
+    pub role: String,
+    pub string_index: Option<usize>,
+}
+
 pub struct MachineStateLogger {
     client: Client,
     insert_state_stmt: Statement,
     insert_operation_stmt: Statement,
+    stepper_role_table_ready: bool,
 }
 
 impl MachineStateLogger {
@@ -102,10 +111,11 @@ impl MachineStateLogger {
             .prepare("INSERT INTO operations (operation_id, state_id, host, recorded_at, operation_type, operation_status, message, stepper_indices, final_positions) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)")
             .context("Failed to prepare operations SQL statement.")?;
 
-        Ok(Self { client, insert_state_stmt, insert_operation_stmt })
+        Ok(Self { client, insert_state_stmt, insert_operation_stmt, stepper_role_table_ready: false })
     }
 
     fn insert_machine_state(&mut self, snapshot: &MachineStateSnapshot) -> Result<()> {
+        self.sync_stepper_roles(&snapshot.host, &snapshot.stepper_roles)?;
         let controls_id_text = snapshot.controls_id.map(|id| id.to_string());
         self.client.execute(&self.insert_state_stmt, &[
             &snapshot.state_id,
@@ -120,6 +130,43 @@ impl MachineStateLogger {
             &snapshot.voice_count_min, &snapshot.voice_count_max, &snapshot.amp_sum_min.iter().map(|&x| x as i32).collect::<Vec<i32>>(), &snapshot.amp_sum_max.iter().map(|&x| x as i32).collect::<Vec<i32>>(),
         ]).context("Failed to insert machine state record.")?;
         info!(target: "machine_state_logger", "Inserted machine state: id={}", snapshot.state_id);
+        Ok(())
+    }
+
+    fn ensure_stepper_role_table(&mut self) -> Result<()> {
+        if self.stepper_role_table_ready {
+            return Ok(());
+        }
+        self.client.batch_execute(
+            "
+            CREATE TABLE IF NOT EXISTS host_config_stepper_roles (
+                host TEXT NOT NULL,
+                stepper_index INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                string_index INTEGER,
+                PRIMARY KEY(host, stepper_index)
+            );
+            "
+        ).context("Failed to create host_config_stepper_roles table")?;
+        self.stepper_role_table_ready = true;
+        Ok(())
+    }
+
+    fn sync_stepper_roles(&mut self, host: &str, roles: &[StepperRoleEntry]) -> Result<()> {
+        self.ensure_stepper_role_table()?;
+        for entry in roles {
+            let stepper_index = entry.stepper_index as i32;
+            let string_index = entry.string_index.map(|idx| idx as i32);
+            self.client.execute(
+                "
+                INSERT INTO host_config_stepper_roles (host, stepper_index, role, string_index)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (host, stepper_index)
+                DO UPDATE SET role = EXCLUDED.role, string_index = EXCLUDED.string_index
+                ",
+                &[&host, &stepper_index, &entry.role, &string_index]
+            ).context("Failed to upsert host_config_stepper_roles")?;
+        }
         Ok(())
     }
 
