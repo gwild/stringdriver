@@ -37,16 +37,24 @@ struct ArduinoStepperOps {
 }
 
 impl ArduinoStepperOps {
+    fn socket_path_for_port(port_path: &str) -> String {
+        let port_id = port_path.replace("/", "_").replace("\\", "_");
+        format!("/tmp/stepper_gui_{}.sock", port_id)
+    }
+
     fn new(port_path: &str) -> Self {
         // Generate socket path the same way as stepper_gui.rs
-        let port_id = port_path.replace("/", "_").replace("\\", "_");
-        let socket_path = format!("/tmp/stepper_gui_{}.sock", port_id);
+        let socket_path = Self::socket_path_for_port(port_path);
         println!("Initializing shared stepper socket target at {}", socket_path);
         Self {
             socket_path,
             stream: None,
             connected_once: false,
         }
+    }
+
+    fn socket_path(&self) -> String {
+        self.socket_path.clone()
     }
     
     fn ensure_stream(&mut self) -> Result<&mut UnixStream> {
@@ -108,6 +116,72 @@ impl ArduinoStepperOps {
         // TODO: Could add a "get_positions" command to stepper_gui socket protocol
         // For now, positions are tracked locally in operations_gui
         Ok(vec![])
+    }
+
+    fn fetch_positions_from_socket(socket_path: &str) -> Result<Vec<i32>> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+
+        let mut stream = UnixStream::connect(socket_path)
+            .map_err(|e| anyhow::anyhow!("Failed to connect to stepper_gui socket at {}: {}", socket_path, e))?;
+        stream
+            .write_all(b"get_positions\n")
+            .map_err(|e| anyhow::anyhow!("Failed to request positions: {}", e))?;
+        stream
+            .flush()
+            .map_err(|e| anyhow::anyhow!("Failed to flush positions request: {}", e))?;
+
+        let mut reader = BufReader::new(stream);
+        let mut response = String::new();
+        let bytes = reader
+            .read_line(&mut response)
+            .map_err(|e| anyhow::anyhow!("Failed to read positions response: {}", e))?;
+        if bytes == 0 {
+            return Err(anyhow::anyhow!("Stepper GUI closed positions socket without replying"));
+        }
+        Self::parse_positions_response(&response)
+    }
+
+    fn parse_positions_response(response: &str) -> Result<Vec<i32>> {
+        let mut tokens = response.trim().split_whitespace();
+        match tokens.next() {
+            Some("positions") => {
+                let mut entries: Vec<(usize, i32)> = Vec::new();
+                let mut max_idx: Option<usize> = None;
+                for token in tokens {
+                    if token.is_empty() {
+                        continue;
+                    }
+                    let (idx_str, val_str) = token
+                        .split_once('=')
+                        .ok_or_else(|| anyhow::anyhow!("Malformed positions token '{}'", token))?;
+                    let idx = idx_str
+                        .parse::<usize>()
+                        .map_err(|e| anyhow::anyhow!("Invalid stepper index '{}': {}", idx_str, e))?;
+                    let value = val_str
+                        .parse::<i32>()
+                        .map_err(|e| anyhow::anyhow!("Invalid stepper value '{}': {}", val_str, e))?;
+                    if let Some(current_max) = max_idx {
+                        if idx > current_max {
+                            max_idx = Some(idx);
+                        }
+                    } else {
+                        max_idx = Some(idx);
+                    }
+                    entries.push((idx, value));
+                }
+                let max_idx = max_idx.unwrap_or(0);
+                let mut positions = vec![0i32; max_idx + 1];
+                for (idx, value) in entries {
+                    if idx < positions.len() {
+                        positions[idx] = value;
+                    }
+                }
+                Ok(positions)
+            }
+            Some(other) => Err(anyhow::anyhow!("Unexpected positions response '{}'", other)),
+            None => Err(anyhow::anyhow!("Empty positions response")),
+        }
     }
 }
 
@@ -219,6 +293,34 @@ impl OperationsGUI {
             }
         }
         
+        // Periodically sync stepper positions from stepper_gui (1 Hz) so logger sees live data
+        if let Ok(ops_guard) = arduino_ops.lock() {
+            let socket_path_for_poll = ops_guard.socket_path();
+            let stepper_positions_for_poll = Arc::clone(&stepper_positions);
+            thread::spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_secs(1));
+                    if !std::path::Path::new(&socket_path_for_poll).exists() {
+                        continue;
+                    }
+                    match ArduinoStepperOps::fetch_positions_from_socket(&socket_path_for_poll) {
+                        Ok(values) => {
+                            if let Ok(mut map) = stepper_positions_for_poll.lock() {
+                                for (idx, pos) in values.iter().enumerate() {
+                                    map.insert(idx, *pos);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Stepper position poll failed: {}", e);
+                        }
+                    }
+                }
+            });
+        } else {
+            eprintln!("WARNING: Failed to acquire Arduino ops lock for position polling");
+        }
+
         // Initialize machine state logging (non-blocking, can fail silently)
         let logger = config_loader::DbSettings::from_env()
             .ok()

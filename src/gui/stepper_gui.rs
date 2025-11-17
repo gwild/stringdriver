@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::process::Command;
 use gethostname::gethostname;
 use egui::Color32;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 use std::path::Path;
 
@@ -148,6 +148,18 @@ impl Default for StepperGUI {
 }
 
 impl StepperGUI {
+    fn write_positions_response(stream: &mut UnixStream, positions: &[i32]) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut response = String::from("positions");
+        for (idx, pos) in positions.iter().enumerate() {
+            response.push(' ');
+            response.push_str(&format!("{}={}", idx, pos));
+        }
+        response.push('\n');
+        stream.write_all(response.as_bytes())?;
+        stream.flush()
+    }
+
     fn new(port_path: String, num_steppers: usize, string_num: usize, x_step_index: Option<usize>, z_first_index: Option<usize>, tuner_first_index: Option<usize>, tuner_port_path: Option<String>, tuner_num_steppers: Option<usize>, debug: bool, debug_file: Option<File>, z_up_step: i32, z_down_step: i32, firmware: ArduinoFirmware) -> Self {
         let mut s = Self::default();
         s.port_path = port_path;
@@ -199,7 +211,7 @@ impl StepperGUI {
     }
     
     /// Handle a text command from Unix socket
-    fn handle_command(&mut self, cmd: &str) {
+    fn handle_command(&mut self, cmd: &str, mut responder: Option<&mut UnixStream>) {
         let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
         if parts.is_empty() {
             return;
@@ -228,6 +240,15 @@ impl StepperGUI {
                         self.log(&format!("IPC: reset {} {} (set_stepper - no physical move)", stepper, position));
                         self.reset_position(stepper, position);
                     }
+                }
+            }
+            "get_positions" => {
+                if let Some(stream) = responder.as_deref_mut() {
+                    if let Err(e) = Self::write_positions_response(stream, &self.positions) {
+                        self.log(&format!("IPC: Failed to send positions: {}", e));
+                    }
+                } else {
+                    self.log("IPC: get_positions requested without responder stream");
                 }
             }
             _ => {
@@ -288,7 +309,8 @@ impl StepperGUI {
                                             continue;
                                         }
                                         if let Ok(mut guard) = app_clone.lock() {
-                                            guard.handle_command(trimmed);
+                                            let stream_ref = reader.get_mut();
+                                            guard.handle_command(trimmed, Some(stream_ref));
                                         }
                                     }
                                     Err(e) => {
@@ -1264,6 +1286,7 @@ impl eframe::App for StepperGUI {
                             for tuner_idx in 0..num_tuners {
                                 ui.vertical(|ui| {
                                     ui.label(format!("Tuner {}", tuner_idx));
+                                    let channel_color = channel_colors[tuner_idx % channel_colors.len()];
                                     
                                     // Get tuner position (from separate board or main board)
                                     let tuner_pos = if tuner_idx < self.tuner_positions.len() {
@@ -1279,7 +1302,9 @@ impl eframe::App for StepperGUI {
                                     let painter = ui.painter();
                                     
                                     // Draw circle background
-                                    painter.circle_filled(rect.center(), rect.width() / 2.0 - 2.0, egui::Color32::from_rgb(40, 40, 40));
+                                    let radius = rect.width() / 2.0 - 2.0;
+                                    painter.circle_filled(rect.center(), radius, egui::Color32::from_rgb(40, 40, 40));
+                                    painter.circle_stroke(rect.center(), radius, egui::Stroke::new(2.0, channel_color));
                                     
                                     // Normalize tuner position to 0-2π for dial indicator
                                     // Tuner range: -100000 to 100000 (Tuner_Driver) or -25000 to 25000 (String_Driver)
@@ -1296,7 +1321,7 @@ impl eframe::App for StepperGUI {
                                     let end_y = rect.center().y - angle.sin() * radius;
                                     painter.line_segment(
                                         [rect.center(), egui::pos2(end_x, end_y)],
-                                        (2.0, Color32::WHITE)
+                                        (2.0, channel_color)
                                     );
                                     
                                     // Display position value
