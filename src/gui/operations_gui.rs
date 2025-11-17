@@ -143,7 +143,7 @@ struct OperationsGUI {
     amp_sum_min: Vec<i32>,      // Per-channel minimum amplitude sum
     amp_sum_max: Vec<i32>,      // Per-channel maximum amplitude sum
     // Track stepper positions locally (updated as we move steppers)
-    stepper_positions: std::collections::HashMap<usize, i32>,
+    stepper_positions: Arc<Mutex<std::collections::HashMap<usize, i32>>>,
     // Exit flag to signal operations to stop
     exit_flag: Arc<AtomicBool>,
     // Operation lock to prevent concurrent execution
@@ -209,7 +209,15 @@ impl OperationsGUI {
         let voice_count_max = vec![12; string_num];
         let amp_sum_min = vec![20; string_num];
         let amp_sum_max = vec![250; string_num];
-        let stepper_positions = std::collections::HashMap::new();
+        let stepper_positions: Arc<Mutex<std::collections::HashMap<usize, i32>>> = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        {
+            let z_indices = operations.lock().unwrap().get_z_stepper_indices();
+            if let Ok(mut map) = stepper_positions.lock() {
+                for idx in z_indices {
+                    map.entry(idx).or_insert(0);
+                }
+            }
+        }
         
         // Initialize machine state logging (non-blocking, can fail silently)
         let logger = config_loader::DbSettings::from_env()
@@ -223,7 +231,7 @@ impl OperationsGUI {
         if let Some(ref logger_ref) = logger {
             let logger_clone = logger_ref.clone();
             let operations_clone = Arc::clone(&operations);
-            let stepper_positions_clone = Arc::new(Mutex::new(stepper_positions.clone()));
+            let stepper_positions_clone = Arc::clone(&stepper_positions);
             let voice_count_min_clone = Arc::new(Mutex::new(voice_count_min.clone()));
             let voice_count_max_clone = Arc::new(Mutex::new(voice_count_max.clone()));
             let amp_sum_min_clone = Arc::new(Mutex::new(amp_sum_min.clone()));
@@ -304,7 +312,7 @@ impl OperationsGUI {
             voice_count_max,
             amp_sum_min,
             amp_sum_max,
-            stepper_positions,
+            stepper_positions: Arc::clone(&stepper_positions),
             repeat_enabled: false,
             repeat_pending: None,
             logging_enabled: logger.is_some(),
@@ -327,7 +335,9 @@ impl OperationsGUI {
             match task.receiver.try_recv() {
                 Ok(result) => {
                     for (idx, pos) in result.updated_positions {
-                        self.stepper_positions.insert(idx, pos);
+                        if let Ok(mut positions) = self.stepper_positions.lock() {
+                            positions.insert(idx, pos);
+                        }
                     }
                     self.append_message(&result.message);
                     self.operation_running.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -437,9 +447,13 @@ impl OperationsGUI {
 
         let max_idx = z_indices.iter().max().copied().unwrap_or(0);
         let mut positions = vec![0i32; max_idx + 1];
+        let current_positions_snapshot = self.stepper_positions
+            .lock()
+            .map(|map| map.clone())
+            .unwrap_or_default();
         for &idx in &z_indices {
             if idx < positions.len() {
-                positions[idx] = self.stepper_positions.get(&idx).copied().unwrap_or(0);
+                positions[idx] = current_positions_snapshot.get(&idx).copied().unwrap_or(0);
             }
         }
         let mut max_positions = std::collections::HashMap::new();
@@ -642,7 +656,7 @@ impl eframe::App for OperationsGUI {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Operations Control");
             
-            // Machine state logging enable checkbox at top
+            // Machine state logging + exit controls
             ui.horizontal(|ui| {
                 ui.label("Machine State Logging:");
                 if let Some(ref logger) = self.logger {
@@ -654,6 +668,11 @@ impl eframe::App for OperationsGUI {
                     }
                 } else {
                     ui.label("(Database not configured)");
+                }
+
+                ui.add_space(16.0);
+                if ui.button("EXIT").clicked() {
+                    self.kill_all();
                 }
             });
             
