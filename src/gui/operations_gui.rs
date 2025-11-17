@@ -15,7 +15,7 @@ mod machine_state_logger;
 
 use eframe::egui;
 use anyhow::Result;
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::{Arc, Mutex, RwLock, atomic::AtomicBool};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -206,7 +206,7 @@ impl operations::StepperOperations for ArduinoStepperOps {
 
 /// Operations GUI state
 struct OperationsGUI {
-    operations: Arc<Mutex<operations::Operations>>,
+    operations: Arc<RwLock<operations::Operations>>,
     message: String,
     partials_slot: PartialsSlot,
     selected_operation: String,
@@ -253,7 +253,7 @@ impl OperationsGUI {
         let port_path = ard_settings.port.clone();
         
         // Create operations with the partials slot (wrap in Arc<Mutex> for sharing with logging thread)
-        let operations = Arc::new(Mutex::new(operations::Operations::new_with_partials_slot(Some(Arc::clone(&partials_slot)))?));
+        let operations = Arc::new(RwLock::new(operations::Operations::new_with_partials_slot(Some(Arc::clone(&partials_slot)))?));
         
         // Create Arduino stepper operations client (connects via IPC to stepper_gui's connection)
         let arduino_ops = Arc::new(Mutex::new(ArduinoStepperOps::new(&port_path)));
@@ -278,14 +278,14 @@ impl OperationsGUI {
         });
         
         // Initialize thresholds with defaults
-        let string_num = operations.lock().unwrap().string_num;
+        let string_num = operations.read().unwrap().string_num;
         let voice_count_min = vec![2; string_num];
         let voice_count_max = vec![12; string_num];
         let amp_sum_min = vec![20; string_num];
         let amp_sum_max = vec![250; string_num];
         let stepper_positions: Arc<Mutex<std::collections::HashMap<usize, i32>>> = Arc::new(Mutex::new(std::collections::HashMap::new()));
         {
-            let enabled_snapshot = operations.lock().unwrap().get_all_stepper_enabled();
+            let enabled_snapshot = operations.read().unwrap().get_all_stepper_enabled();
             if let Ok(mut map) = stepper_positions.lock() {
                 for idx in enabled_snapshot.keys() {
                     map.entry(*idx).or_insert(0);
@@ -349,8 +349,8 @@ impl OperationsGUI {
                     if Instant::now().duration_since(last_log) >= LOG_INTERVAL {
                         if logger_clone.is_enabled() {
                             // Capture machine state from existing arrays (non-blocking, no Arduino query)
-                            if let (Ok(ops), Ok(positions_map), Ok(vc_min), Ok(vc_max), Ok(amp_min), Ok(amp_max)) = 
-                                (operations_clone.lock(), stepper_positions_clone.lock(), 
+                    if let (Ok(ops), Ok(positions_map), Ok(vc_min), Ok(vc_max), Ok(amp_min), Ok(amp_max)) = 
+                        (operations_clone.read(), stepper_positions_clone.lock(), 
                                  voice_count_min_clone.lock(), voice_count_max_clone.lock(),
                                  amp_sum_min_clone.lock(), amp_sum_max_clone.lock()) {
                                 
@@ -463,7 +463,7 @@ impl OperationsGUI {
 
         if let Some(op) = schedule_repeat_op {
             if self.repeat_enabled {
-                let lap_rest = self.operations.lock().unwrap().get_lap_rest().max(0.0);
+                let lap_rest = self.operations.read().unwrap().get_lap_rest().max(0.0);
                 let wait = if lap_rest <= 0.0 {
                     Duration::from_secs(0)
                 } else {
@@ -531,7 +531,7 @@ impl OperationsGUI {
             }
         };
 
-        let z_indices = self.operations.lock().unwrap().get_z_stepper_indices();
+        let z_indices = self.operations.read().unwrap().get_z_stepper_indices();
         if z_indices.is_empty() {
             self.append_message("No Z steppers configured");
             return;
@@ -592,7 +592,7 @@ impl OperationsGUI {
                         return;
                     }
                 };
-                let mut ops_guard = match operations.lock() {
+                let ops_guard = match operations.read() {
                     Ok(guard) => guard,
                     Err(_) => {
                         let _ = tx.send(OperationResult {
@@ -753,7 +753,7 @@ impl eframe::App for OperationsGUI {
         
         // Update audio analysis from partials slot using get_results module
         let partials = get_results::read_partials_from_slot(&self.partials_slot);
-        self.operations.lock().unwrap().update_audio_analysis_with_partials(partials);
+        self.operations.read().unwrap().update_audio_analysis_with_partials(partials);
         
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Operations Control");
@@ -794,10 +794,10 @@ impl eframe::App for OperationsGUI {
             ui.heading("Adjustment Parameters");
             
             ui.horizontal(|ui| {
-                let current_enabled = self.operations.lock().unwrap().get_bump_check_enable();
+                let current_enabled = self.operations.read().unwrap().get_bump_check_enable();
                 let mut bump_enabled = current_enabled;
                 if ui.checkbox(&mut bump_enabled, "Bump check enabled").changed() {
-                    self.operations.lock().unwrap().set_bump_check_enable(bump_enabled);
+                    self.operations.read().unwrap().set_bump_check_enable(bump_enabled);
                     self.append_message(&format!("Bump check {}", if bump_enabled { "enabled" } else { "disabled" }));
                     if !bump_enabled {
                         self.repeat_pending = None;
@@ -808,44 +808,44 @@ impl eframe::App for OperationsGUI {
             
             ui.horizontal(|ui| {
                 ui.label("Adjustment Level:");
-                let mut adjustment_level = self.operations.lock().unwrap().get_adjustment_level();
+                let mut adjustment_level = self.operations.read().unwrap().get_adjustment_level();
                 let mut drag = egui::DragValue::new(&mut adjustment_level);
                 drag = drag.clamp_range(1..=100);
                 if ui.add(drag).changed() {
-                    self.operations.lock().unwrap().set_adjustment_level(adjustment_level);
+                    self.operations.read().unwrap().set_adjustment_level(adjustment_level);
                     self.append_message(&format!("Adjustment level set to {}", adjustment_level));
                 }
             });
             
             ui.horizontal(|ui| {
                 ui.label("Retry Threshold:");
-                let mut retry_threshold = self.operations.lock().unwrap().get_retry_threshold();
+                let mut retry_threshold = self.operations.read().unwrap().get_retry_threshold();
                 let mut drag = egui::DragValue::new(&mut retry_threshold);
                 drag = drag.clamp_range(1..=1000);
                 if ui.add(drag).changed() {
-                    self.operations.lock().unwrap().set_retry_threshold(retry_threshold);
+                    self.operations.read().unwrap().set_retry_threshold(retry_threshold);
                     self.append_message(&format!("Retry threshold set to {}", retry_threshold));
                 }
             });
             
             ui.horizontal(|ui| {
                 ui.label("Delta Threshold:");
-                let mut delta_threshold = self.operations.lock().unwrap().get_delta_threshold();
+                let mut delta_threshold = self.operations.read().unwrap().get_delta_threshold();
                 let mut drag = egui::DragValue::new(&mut delta_threshold);
                 drag = drag.clamp_range(1..=1000);
                 if ui.add(drag).changed() {
-                    self.operations.lock().unwrap().set_delta_threshold(delta_threshold);
+                    self.operations.read().unwrap().set_delta_threshold(delta_threshold);
                     self.append_message(&format!("Delta threshold set to {}", delta_threshold));
                 }
             });
             
             ui.horizontal(|ui| {
                 ui.label("Z Variance Threshold:");
-                let mut z_variance_threshold = self.operations.lock().unwrap().get_z_variance_threshold();
+                let mut z_variance_threshold = self.operations.read().unwrap().get_z_variance_threshold();
                 let mut drag = egui::DragValue::new(&mut z_variance_threshold);
                 drag = drag.clamp_range(1..=1000);
                 if ui.add(drag).changed() {
-                    self.operations.lock().unwrap().set_z_variance_threshold(z_variance_threshold);
+                    self.operations.read().unwrap().set_z_variance_threshold(z_variance_threshold);
                     self.append_message(&format!("Z variance threshold set to {}", z_variance_threshold));
                 }
             });
@@ -857,44 +857,44 @@ impl eframe::App for OperationsGUI {
             
             ui.horizontal(|ui| {
                 ui.label("Tune Rest:");
-                let mut tune_rest = self.operations.lock().unwrap().get_tune_rest();
+                let mut tune_rest = self.operations.read().unwrap().get_tune_rest();
                 let mut drag = egui::DragValue::new(&mut tune_rest).speed(0.1);
                 drag = drag.clamp_range(0.0..=100.0);
                 if ui.add(drag).changed() {
-                    self.operations.lock().unwrap().set_tune_rest(tune_rest);
+                    self.operations.read().unwrap().set_tune_rest(tune_rest);
                     self.append_message(&format!("Tune rest set to {:.2}", tune_rest));
                 }
             });
             
             ui.horizontal(|ui| {
                 ui.label("X Rest:");
-                let mut x_rest = self.operations.lock().unwrap().get_x_rest();
+                let mut x_rest = self.operations.read().unwrap().get_x_rest();
                 let mut drag = egui::DragValue::new(&mut x_rest).speed(0.1);
                 drag = drag.clamp_range(0.0..=100.0);
                 if ui.add(drag).changed() {
-                    self.operations.lock().unwrap().set_x_rest(x_rest);
+                    self.operations.read().unwrap().set_x_rest(x_rest);
                     self.append_message(&format!("X rest set to {:.2}", x_rest));
                 }
             });
             
             ui.horizontal(|ui| {
                 ui.label("Z Rest:");
-                let mut z_rest = self.operations.lock().unwrap().get_z_rest();
+                let mut z_rest = self.operations.read().unwrap().get_z_rest();
                 let mut drag = egui::DragValue::new(&mut z_rest).speed(0.1);
                 drag = drag.clamp_range(0.0..=100.0);
                 if ui.add(drag).changed() {
-                    self.operations.lock().unwrap().set_z_rest(z_rest);
+                    self.operations.read().unwrap().set_z_rest(z_rest);
                     self.append_message(&format!("Z rest set to {:.2}", z_rest));
                 }
             });
             
             ui.horizontal(|ui| {
                 ui.label("Lap Rest:");
-                let mut lap_rest = self.operations.lock().unwrap().get_lap_rest();
+                let mut lap_rest = self.operations.read().unwrap().get_lap_rest();
                 let mut drag = egui::DragValue::new(&mut lap_rest).speed(0.1);
                 drag = drag.clamp_range(0.0..=100.0);
                 if ui.add(drag).changed() {
-                    self.operations.lock().unwrap().set_lap_rest(lap_rest);
+                    self.operations.read().unwrap().set_lap_rest(lap_rest);
                     self.append_message(&format!("Lap rest set to {:.2}", lap_rest));
                 }
             });
@@ -912,7 +912,7 @@ impl eframe::App for OperationsGUI {
                 });
             });
             
-            let voice_count = self.operations.lock().unwrap().get_voice_count();
+            let voice_count = self.operations.read().unwrap().get_voice_count();
             const NUM_PARTIALS: f32 = 12.0; // Number of partials per channel
             for (ch_idx, count) in voice_count.iter().enumerate() {
                 ui.horizontal(|ui| {
@@ -981,7 +981,7 @@ impl eframe::App for OperationsGUI {
                 });
             });
             
-            let amp_sum = self.operations.lock().unwrap().get_amp_sum();
+            let amp_sum = self.operations.read().unwrap().get_amp_sum();
             for (ch_idx, sum) in amp_sum.iter().enumerate() {
                 ui.horizontal(|ui| {
                     // Ensure we have enough elements in the vectors
@@ -1045,7 +1045,7 @@ impl eframe::App for OperationsGUI {
             ui.label("(Controls which steppers participate in operations/bump_check)");
 
             let (z_indices, bump_status, num_pairs, z_first, x_step_index, tuner_indices) = {
-                let ops_guard = self.operations.lock().unwrap();
+                let ops_guard = self.operations.read().unwrap();
                 (
                     ops_guard.get_z_stepper_indices(),
                     ops_guard.get_bump_status(),
@@ -1058,9 +1058,9 @@ impl eframe::App for OperationsGUI {
 
             if let Some(x_idx) = x_step_index {
                 ui.horizontal(|ui| {
-                    let mut enabled = self.operations.lock().unwrap().get_stepper_enabled(x_idx);
+                    let mut enabled = self.operations.read().unwrap().get_stepper_enabled(x_idx);
                     if ui.checkbox(&mut enabled, format!("Stepper {} (X)", x_idx)).changed() {
-                        self.operations.lock().unwrap().set_stepper_enabled(x_idx, enabled);
+                        self.operations.read().unwrap().set_stepper_enabled(x_idx, enabled);
                         self.append_message(&format!("Stepper {} {}", x_idx, if enabled { "enabled" } else { "disabled" }));
                     }
                 });
@@ -1069,9 +1069,9 @@ impl eframe::App for OperationsGUI {
             if !tuner_indices.is_empty() {
                 ui.label("Tuners:");
                 for (t_idx, step_idx) in tuner_indices.iter().enumerate() {
-                    let mut enabled = self.operations.lock().unwrap().get_stepper_enabled(*step_idx);
+                    let mut enabled = self.operations.read().unwrap().get_stepper_enabled(*step_idx);
                     if ui.checkbox(&mut enabled, format!("Stepper {} (T{})", step_idx, t_idx)).changed() {
-                        self.operations.lock().unwrap().set_stepper_enabled(*step_idx, enabled);
+                        self.operations.read().unwrap().set_stepper_enabled(*step_idx, enabled);
                         self.append_message(&format!("Stepper {} {}", step_idx, if enabled { "enabled" } else { "disabled" }));
                     }
                 }
@@ -1095,7 +1095,7 @@ impl eframe::App for OperationsGUI {
                 ui.horizontal(|ui| {
                     // Left column: "out" stepper (Stepper2)
                     ui.vertical(|ui| {
-                        let mut enabled = self.operations.lock().unwrap().get_stepper_enabled(left_idx);
+                        let mut enabled = self.operations.read().unwrap().get_stepper_enabled(left_idx);
                         let is_bumping = bump_map.get(&left_idx).copied().unwrap_or(false);
                         
                         let label = format!("Stepper {} (Z{})", 
@@ -1105,7 +1105,7 @@ impl eframe::App for OperationsGUI {
                         
                         ui.horizontal(|ui| {
                             if ui.checkbox(&mut enabled, &label).changed() {
-                                self.operations.lock().unwrap().set_stepper_enabled(left_idx, enabled);
+                                self.operations.read().unwrap().set_stepper_enabled(left_idx, enabled);
                                 self.append_message(&format!("Stepper {} {}", left_idx, if enabled { "enabled" } else { "disabled" }));
                             }
                             
@@ -1121,7 +1121,7 @@ impl eframe::App for OperationsGUI {
                     
                     // Right column: "in" stepper (Stepper1)
                     ui.vertical(|ui| {
-                        let mut enabled = self.operations.lock().unwrap().get_stepper_enabled(right_idx);
+                        let mut enabled = self.operations.read().unwrap().get_stepper_enabled(right_idx);
                         let is_bumping = bump_map.get(&right_idx).copied().unwrap_or(false);
                         
                         let label = format!("Stepper {} (Z{})", 
@@ -1131,7 +1131,7 @@ impl eframe::App for OperationsGUI {
                         
                         ui.horizontal(|ui| {
                             if ui.checkbox(&mut enabled, &label).changed() {
-                                self.operations.lock().unwrap().set_stepper_enabled(right_idx, enabled);
+                                self.operations.read().unwrap().set_stepper_enabled(right_idx, enabled);
                                 self.append_message(&format!("Stepper {} {}", right_idx, if enabled { "enabled" } else { "disabled" }));
                             }
                             
