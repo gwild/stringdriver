@@ -71,6 +71,8 @@ pub struct Operations {
     z_variance_threshold: Arc<Mutex<i32>>,
     pub z_first_index: usize,
     pub string_num: usize,
+    pub x_step_index: Option<usize>,
+    pub tuner_indices: Vec<usize>,
     pub stepper_enabled: StepperEnabled,
     pub gpio: Option<crate::gpio::GpioBoard>,
     arduino_connected: bool,
@@ -125,17 +127,20 @@ impl Operations {
         let gpio = gpio_settings.map(|_| crate::gpio::GpioBoard::new()).transpose()?;
         let arduino_connected = ard_settings.num_steppers > 0;
         
+        let x_step_index = ard_settings.x_step_index;
+        let tuner_indices = mainboard_tuner_indices(&ard_settings);
+        
         // Initialize stepper enabled states (all enabled by default)
         let mut stepper_enabled = HashMap::new();
         for i in 0..(string_num * 2) {
             let stepper_idx = z_first_index + i;
             stepper_enabled.insert(stepper_idx, true);
         }
-        if let Some(x_idx) = ard_settings.x_step_index {
+        if let Some(x_idx) = x_step_index {
             stepper_enabled.insert(x_idx, true);
         }
-        for idx in mainboard_tuner_indices(&ard_settings) {
-            stepper_enabled.insert(idx, true);
+        for idx in &tuner_indices {
+            stepper_enabled.insert(*idx, true);
         }
         
         Ok(Self {
@@ -153,6 +158,8 @@ impl Operations {
             z_variance_threshold: Arc::new(Mutex::new(z_variance_threshold)),
             z_first_index,
             string_num,
+            x_step_index,
+            tuner_indices,
             stepper_enabled: Arc::new(Mutex::new(stepper_enabled)),
             gpio,
             arduino_connected,
@@ -202,6 +209,14 @@ impl Operations {
         self.z_down_step.lock()
             .map(|s| *s)
             .unwrap_or(-2)
+    }
+    
+    pub fn x_step_index(&self) -> Option<usize> {
+        self.x_step_index
+    }
+    
+    pub fn tuner_indices(&self) -> Vec<usize> {
+        self.tuner_indices.clone()
     }
     
     /// Set tune_rest value
