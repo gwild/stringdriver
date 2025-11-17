@@ -142,6 +142,8 @@ struct OperationsGUI {
     voice_count_max: Vec<i32>,  // Per-channel maximum voice count
     amp_sum_min: Vec<i32>,      // Per-channel minimum amplitude sum
     amp_sum_max: Vec<i32>,      // Per-channel maximum amplitude sum
+    x_step_index: Option<usize>,
+    tuner_indices: Vec<usize>,
     // Track stepper positions locally (updated as we move steppers)
     stepper_positions: Arc<Mutex<std::collections::HashMap<usize, i32>>>,
     // Exit flag to signal operations to stop
@@ -177,6 +179,8 @@ impl OperationsGUI {
         let ard_settings = config_loader::load_arduino_settings(&hostname)?;
         let string_num = ard_settings.string_num;
         let port_path = ard_settings.port.clone();
+        let x_step_index = ard_settings.x_step_index;
+        let tuner_indices = config_loader::mainboard_tuner_indices(&ard_settings);
         
         // Create operations with the partials slot (wrap in Arc<Mutex> for sharing with logging thread)
         let operations = Arc::new(Mutex::new(operations::Operations::new_with_partials_slot(Some(Arc::clone(&partials_slot)))?));
@@ -215,6 +219,12 @@ impl OperationsGUI {
             if let Ok(mut map) = stepper_positions.lock() {
                 for idx in z_indices {
                     map.entry(idx).or_insert(0);
+                }
+                if let Some(x_idx) = x_step_index {
+                    map.entry(x_idx).or_insert(0);
+                }
+                for idx in &tuner_indices {
+                    map.entry(*idx).or_insert(0);
                 }
             }
         }
@@ -312,6 +322,8 @@ impl OperationsGUI {
             voice_count_max,
             amp_sum_min,
             amp_sum_max,
+            x_step_index,
+            tuner_indices,
             stepper_positions: Arc::clone(&stepper_positions),
             repeat_enabled: false,
             repeat_pending: None,
@@ -941,7 +953,29 @@ impl eframe::App for OperationsGUI {
             // Stepper enable/disable checkboxes
             ui.heading("Stepper Enable/Disable");
             ui.label("(Controls which steppers participate in operations/bump_check)");
-            
+
+            if let Some(x_idx) = self.x_step_index {
+                ui.horizontal(|ui| {
+                    let mut enabled = self.operations.lock().unwrap().get_stepper_enabled(x_idx);
+                    if ui.checkbox(&mut enabled, format!("Stepper {} (X)", x_idx)).changed() {
+                        self.operations.lock().unwrap().set_stepper_enabled(x_idx, enabled);
+                        self.append_message(&format!("Stepper {} {}", x_idx, if enabled { "enabled" } else { "disabled" }));
+                    }
+                });
+            }
+
+            if !self.tuner_indices.is_empty() {
+                ui.label("Tuners:");
+                let tuner_indices_snapshot = self.tuner_indices.clone();
+                for (t_idx, step_idx) in tuner_indices_snapshot.iter().enumerate() {
+                    let mut enabled = self.operations.lock().unwrap().get_stepper_enabled(*step_idx);
+                    if ui.checkbox(&mut enabled, format!("Stepper {} (T{})", step_idx, t_idx)).changed() {
+                        self.operations.lock().unwrap().set_stepper_enabled(*step_idx, enabled);
+                        self.append_message(&format!("Stepper {} {}", step_idx, if enabled { "enabled" } else { "disabled" }));
+                    }
+                }
+            }
+
             let (z_indices, bump_status, num_pairs, z_first) = {
                 let ops_guard = self.operations.lock().unwrap();
                 (ops_guard.get_z_stepper_indices(), ops_guard.get_bump_status(), ops_guard.string_num, ops_guard.z_first_index)

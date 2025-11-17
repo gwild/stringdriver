@@ -134,6 +134,30 @@ pub fn load_arduino_settings(hostname: &str) -> Result<ArduinoSettings> {
     })
 }
 
+pub fn mainboard_tuner_indices(settings: &ArduinoSettings) -> Vec<usize> {
+    if settings.ard_t_port.is_some() {
+        return Vec::new();
+    }
+    let tuner_first = match settings.tuner_first_index {
+        Some(idx) => idx,
+        None => return Vec::new(),
+    };
+    let z_first = match settings.z_first_index {
+        Some(idx) => idx,
+        None => return Vec::new(),
+    };
+    let mut limit = z_first;
+    if let Some(x_idx) = settings.x_step_index {
+        if x_idx > tuner_first && x_idx < limit {
+            limit = x_idx;
+        }
+    }
+    if limit <= tuner_first {
+        return Vec::new();
+    }
+    (tuner_first..limit).collect()
+}
+
 // -------------------- Operations config --------------------
 
 #[derive(Debug, Clone)]

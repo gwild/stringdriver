@@ -5,7 +5,7 @@
 
 use anyhow::{anyhow, Result};
 use gethostname::gethostname;
-use crate::config_loader::{load_operations_settings, load_arduino_settings, load_gpio_settings};
+use crate::config_loader::{load_operations_settings, load_arduino_settings, load_gpio_settings, mainboard_tuner_indices};
 use crate::gpio;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -126,11 +126,16 @@ impl Operations {
         let arduino_connected = ard_settings.num_steppers > 0;
         
         // Initialize stepper enabled states (all enabled by default)
-        // Only track Z steppers (for operations/bump_check)
         let mut stepper_enabled = HashMap::new();
         for i in 0..(string_num * 2) {
             let stepper_idx = z_first_index + i;
             stepper_enabled.insert(stepper_idx, true);
+        }
+        if let Some(x_idx) = ard_settings.x_step_index {
+            stepper_enabled.insert(x_idx, true);
+        }
+        for idx in mainboard_tuner_indices(&ard_settings) {
+            stepper_enabled.insert(idx, true);
         }
         
         Ok(Self {
