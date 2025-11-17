@@ -747,6 +747,12 @@ impl Operations {
         let z_indices = self.get_z_stepper_indices();
         let enabled_states = self.get_all_stepper_enabled();
         let z_down_step = self.get_z_down_step();
+        let mut original_positions = std::collections::HashMap::new();
+        for &idx in &z_indices {
+            if let Some(pos) = positions.get(idx).copied() {
+                original_positions.insert(idx, pos);
+            }
+        }
         
         messages.push("Starting Z calibration...".to_string());
         
@@ -834,6 +840,23 @@ impl Operations {
             }
         }
         
+        // Summarize calibration offsets relative to starting positions
+        let mut offset_summaries = Vec::new();
+        for &idx in &z_indices {
+            if let Some(orig) = original_positions.get(&idx) {
+                if let Some(current) = positions.get(idx).copied() {
+                    let offset = orig - current;
+                    if offset != 0 {
+                        offset_summaries.push(format!("{}: {}", idx, offset));
+                    }
+                }
+            }
+        }
+        if !offset_summaries.is_empty() {
+            messages.push(format!("Calibration Offsets: {}", offset_summaries.join(", ")));
+        } else {
+            messages.push("Calibration Offsets: none".to_string());
+        }
         messages.push("Z calibration complete - all enabled steppers moved until touching or disabled".to_string());
         
         // Call bump_check to handle any steppers still touching after calibration
