@@ -211,6 +211,7 @@ struct OperationsGUI {
     message: String,
     partials_slot: PartialsSlot,
     partials_per_channel: Arc<AtomicUsize>,
+    voice_count_cap_cache: i32,
     selected_operation: String,
     arduino_ops: Option<Arc<Mutex<ArduinoStepperOps>>>,
     // Thresholds for z_adjust operation
@@ -265,20 +266,29 @@ impl OperationsGUI {
         
         // Spawn a thread to periodically update the partials slot from shared memory
         let partials_slot_thread = Arc::clone(&partials_slot);
-        let partials_setting_for_thread = Arc::clone(&partials_per_channel);
+        let partials_detected_for_thread = Arc::clone(&partials_per_channel);
         thread::spawn(move || {
             loop {
-                let partial_count = std::cmp::max(
+                let partial_hint = std::cmp::max(
                     1,
-                    partials_setting_for_thread.load(std::sync::atomic::Ordering::Relaxed),
+                    partials_detected_for_thread.load(std::sync::atomic::Ordering::Relaxed),
                 );
                 // Read from shared memory and update the slot
                 if let Some(partials) = operations::Operations::read_partials_from_shared_memory(
                     string_num,
-                    partial_count,
+                    partial_hint,
                 ) {
                     if let Ok(mut slot) = partials_slot_thread.lock() {
-                        *slot = Some(partials);
+                        *slot = Some(partials.clone());
+                    }
+                    let observed = partials
+                        .iter()
+                        .map(|channel| channel.len())
+                        .max()
+                        .unwrap_or(0);
+                    if observed > 0 {
+                        partials_detected_for_thread
+                            .store(observed, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
                 // Update at ~60 Hz to match GUI frame rate
@@ -431,6 +441,7 @@ impl OperationsGUI {
             operation_task: None,
             partials_slot,
             partials_per_channel: Arc::clone(&partials_per_channel),
+            voice_count_cap_cache: voice_count_cap,
             selected_operation: "None".to_string(),
             arduino_ops: Some(arduino_ops),
             voice_count_min,
@@ -489,6 +500,18 @@ impl OperationsGUI {
             if let Ok(mut guard) = arc.lock() {
                 *guard = max_snapshot;
             }
+        }
+    }
+    
+    fn reconcile_voice_count_cap(&mut self) {
+        let detected = self.partials_per_channel.load(std::sync::atomic::Ordering::Relaxed) as i32;
+        if detected <= 0 {
+            return;
+        }
+        if detected != self.voice_count_cap_cache {
+            self.voice_count_cap_cache = detected;
+            self.sync_voice_threshold_caps(detected);
+            self.publish_voice_thresholds_to_logger();
         }
     }
     
@@ -816,6 +839,7 @@ impl eframe::App for OperationsGUI {
         // Update audio analysis from partials slot using get_results module
         let partials = get_results::read_partials_from_slot(&self.partials_slot);
         self.operations.read().unwrap().update_audio_analysis_with_partials(partials);
+        self.reconcile_voice_count_cap();
         
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Operations Control");
@@ -965,35 +989,17 @@ impl eframe::App for OperationsGUI {
             
             // Audio analysis display
             ui.heading("Audio Analysis");
-            ui.horizontal(|ui| {
-                ui.label("Partials / channel:");
-                let mut partials_setting = self.partials_per_channel.load(std::sync::atomic::Ordering::Relaxed) as i32;
-                if ui
-                    .add(egui::DragValue::new(&mut partials_setting).clamp_range(1..=64))
-                    .changed()
-                {
-                    let new_value = std::cmp::max(1, partials_setting);
-                    self.partials_per_channel
-                        .store(new_value as usize, std::sync::atomic::Ordering::Relaxed);
-                    self.sync_voice_threshold_caps(new_value);
-                    self.publish_voice_thresholds_to_logger();
-                    self.append_message(&format!("Set partials/channel to {}", new_value));
-                }
-            });
             
             // Voice count display with horizontal meters and thresholds
+            let voice_cap = self.voice_count_cap_cache.max(1);
             ui.horizontal(|ui| {
-                ui.label("Voice Count (per channel):");
+                ui.label(format!("Voice Count (per channel, max {}):", voice_cap));
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.label("Thresholds");
                 });
             });
             
             let voice_count = self.operations.read().unwrap().get_voice_count();
-            let voice_cap = std::cmp::max(
-                1,
-                self.partials_per_channel.load(std::sync::atomic::Ordering::Relaxed) as i32,
-            );
             let mut thresholds_changed = false;
             for (ch_idx, count) in voice_count.iter().enumerate() {
                 ui.horizontal(|ui| {

@@ -430,18 +430,30 @@ impl Operations {
     /// Returns None if file doesn't exist or can't be read
     /// num_channels: number of channels to read (typically string_num)
     /// num_partials_per_channel: number of partials per channel (typically 12)
-    pub fn read_partials_from_shared_memory(num_channels: usize, num_partials_per_channel: usize) -> Option<PartialsData> {
+pub fn read_partials_from_shared_memory(num_channels: usize, mut num_partials_per_channel: usize) -> Option<PartialsData> {
         let shm_path = Self::get_shared_memory_path();
         
         // Try to open and read the shared memory file
         let file = OpenOptions::new().read(true).open(&shm_path).ok()?;
         let mmap = unsafe { Mmap::map(&file).ok()? };
         
-        // Deserialize bytes: each partial is (f32 freq, f32 amp) = 8 bytes
-        // Format: channel 0 partials, channel 1 partials, etc.
-        // Each channel has exactly num_partials_per_channel partials
-        const PARTIAL_SIZE: usize = 8; // 2 * f32 = 8 bytes
-        let channel_size = num_partials_per_channel * PARTIAL_SIZE;
+    // Deserialize bytes: each partial is (f32 freq, f32 amp) = 8 bytes
+    // Format: channel 0 partials, channel 1 partials, etc.
+    // Each channel has exactly num_partials_per_channel partials
+    const PARTIAL_SIZE: usize = 8; // 2 * f32 = 8 bytes
+    if num_channels > 0 {
+        let total_entries = mmap.len() / PARTIAL_SIZE;
+        let detected = total_entries / num_channels;
+        if detected > 0 {
+            num_partials_per_channel = detected;
+        }
+    }
+    let mut channel_size = num_partials_per_channel * PARTIAL_SIZE;
+    if channel_size == 0 {
+        // Fallback to default of 12 if still zero
+        num_partials_per_channel = 12;
+        channel_size = num_partials_per_channel * PARTIAL_SIZE;
+    }
         
         let mut partials = Vec::new();
         let mut offset = 0;
