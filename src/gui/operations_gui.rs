@@ -16,7 +16,7 @@ mod machine_state_logger;
 use eframe::egui;
 use anyhow::Result;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex, RwLock, atomic::AtomicBool};
+use std::sync::{Arc, Mutex, RwLock, atomic::{AtomicBool, AtomicUsize}};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -210,11 +210,14 @@ struct OperationsGUI {
     operations: Arc<RwLock<operations::Operations>>,
     message: String,
     partials_slot: PartialsSlot,
+    partials_per_channel: Arc<AtomicUsize>,
     selected_operation: String,
     arduino_ops: Option<Arc<Mutex<ArduinoStepperOps>>>,
     // Thresholds for z_adjust operation
     voice_count_min: Vec<i32>,  // Per-channel minimum voice count
     voice_count_max: Vec<i32>,  // Per-channel maximum voice count
+    voice_count_min_logger: Option<Arc<Mutex<Vec<i32>>>>,
+    voice_count_max_logger: Option<Arc<Mutex<Vec<i32>>>>,
     amp_sum_min: Vec<i32>,      // Per-channel minimum amplitude sum
     amp_sum_max: Vec<i32>,      // Per-channel maximum amplitude sum
     // Track stepper positions locally (updated as we move steppers)
@@ -246,6 +249,7 @@ impl OperationsGUI {
     fn new() -> Result<Self> {
         // Create a partials slot for shared memory updates
         let partials_slot: PartialsSlot = Arc::new(Mutex::new(None));
+        let partials_per_channel = Arc::new(AtomicUsize::new(12));
         
         // Get config to know how many channels to read and Arduino port
         let hostname = gethostname::gethostname().to_string_lossy().to_string();
@@ -261,13 +265,17 @@ impl OperationsGUI {
         
         // Spawn a thread to periodically update the partials slot from shared memory
         let partials_slot_thread = Arc::clone(&partials_slot);
+        let partials_setting_for_thread = Arc::clone(&partials_per_channel);
         thread::spawn(move || {
-            const DEFAULT_NUM_PARTIALS: usize = 12;
             loop {
+                let partial_count = std::cmp::max(
+                    1,
+                    partials_setting_for_thread.load(std::sync::atomic::Ordering::Relaxed),
+                );
                 // Read from shared memory and update the slot
                 if let Some(partials) = operations::Operations::read_partials_from_shared_memory(
                     string_num,
-                    DEFAULT_NUM_PARTIALS
+                    partial_count,
                 ) {
                     if let Ok(mut slot) = partials_slot_thread.lock() {
                         *slot = Some(partials);
@@ -280,8 +288,10 @@ impl OperationsGUI {
         
         // Initialize thresholds with defaults
         let string_num = operations.read().unwrap().string_num;
-        let voice_count_min = vec![2; string_num];
-        let voice_count_max = vec![12; string_num];
+        let voice_count_cap = std::cmp::max(1, partials_per_channel.load(std::sync::atomic::Ordering::Relaxed) as i32);
+        let voice_count_min_default = std::cmp::min(2, voice_count_cap);
+        let voice_count_min = vec![voice_count_min_default; string_num];
+        let voice_count_max = vec![voice_count_cap; string_num];
         let amp_sum_min = vec![20; string_num];
         let amp_sum_max = vec![250; string_num];
         let stepper_positions: Arc<Mutex<std::collections::HashMap<usize, i32>>> = Arc::new(Mutex::new(std::collections::HashMap::new()));
@@ -333,6 +343,8 @@ impl OperationsGUI {
             .and_then(|db_config| {
                 Some(machine_state_logger::MachineStateLoggingContext::new_nonblocking(db_config))
             });
+        let mut voice_count_min_logger_arc: Option<Arc<Mutex<Vec<i32>>>> = None;
+        let mut voice_count_max_logger_arc: Option<Arc<Mutex<Vec<i32>>>> = None;
         
         // Start 1Hz logging thread if logger available
         // Uses existing position arrays - does NOT query Arduino (non-blocking)
@@ -342,6 +354,8 @@ impl OperationsGUI {
             let stepper_positions_clone = Arc::clone(&stepper_positions);
             let voice_count_min_clone = Arc::new(Mutex::new(voice_count_min.clone()));
             let voice_count_max_clone = Arc::new(Mutex::new(voice_count_max.clone()));
+            voice_count_min_logger_arc = Some(Arc::clone(&voice_count_min_clone));
+            voice_count_max_logger_arc = Some(Arc::clone(&voice_count_max_clone));
             let amp_sum_min_clone = Arc::new(Mutex::new(amp_sum_min.clone()));
             let amp_sum_max_clone = Arc::new(Mutex::new(amp_sum_max.clone()));
             let hostname_clone = hostname.clone();
@@ -416,10 +430,13 @@ impl OperationsGUI {
             operation_running: Arc::new(AtomicBool::new(false)),
             operation_task: None,
             partials_slot,
+            partials_per_channel: Arc::clone(&partials_per_channel),
             selected_operation: "None".to_string(),
             arduino_ops: Some(arduino_ops),
             voice_count_min,
             voice_count_max,
+            voice_count_min_logger: voice_count_min_logger_arc,
+            voice_count_max_logger: voice_count_max_logger_arc,
             amp_sum_min,
             amp_sum_max,
             stepper_positions: Arc::clone(&stepper_positions),
@@ -436,6 +453,43 @@ impl OperationsGUI {
             self.message.push('\n');
         }
         self.message.push_str(msg);
+    }
+    
+    fn sync_voice_threshold_caps(&mut self, new_cap: i32) {
+        let cap = std::cmp::max(1, new_cap);
+        for max_val in self.voice_count_max.iter_mut() {
+            if *max_val > cap {
+                *max_val = cap;
+            }
+        }
+        for (idx, min_val) in self.voice_count_min.iter_mut().enumerate() {
+            if *min_val > cap {
+                *min_val = cap;
+            }
+            if let Some(current_max) = self.voice_count_max.get(idx) {
+                if *min_val > *current_max {
+                    *min_val = *current_max;
+                }
+            }
+        }
+    }
+    
+    fn publish_voice_thresholds_to_logger(&self) {
+        if self.voice_count_min_logger.is_none() && self.voice_count_max_logger.is_none() {
+            return;
+        }
+        let min_snapshot = self.voice_count_min.clone();
+        let max_snapshot = self.voice_count_max.clone();
+        if let Some(ref arc) = self.voice_count_min_logger {
+            if let Ok(mut guard) = arc.lock() {
+                *guard = min_snapshot.clone();
+            }
+        }
+        if let Some(ref arc) = self.voice_count_max_logger {
+            if let Ok(mut guard) = arc.lock() {
+                *guard = max_snapshot;
+            }
+        }
     }
     
     fn poll_operation_result(&mut self) {
@@ -911,6 +965,21 @@ impl eframe::App for OperationsGUI {
             
             // Audio analysis display
             ui.heading("Audio Analysis");
+            ui.horizontal(|ui| {
+                ui.label("Partials / channel:");
+                let mut partials_setting = self.partials_per_channel.load(std::sync::atomic::Ordering::Relaxed) as i32;
+                if ui
+                    .add(egui::DragValue::new(&mut partials_setting).clamp_range(1..=64))
+                    .changed()
+                {
+                    let new_value = std::cmp::max(1, partials_setting);
+                    self.partials_per_channel
+                        .store(new_value as usize, std::sync::atomic::Ordering::Relaxed);
+                    self.sync_voice_threshold_caps(new_value);
+                    self.publish_voice_thresholds_to_logger();
+                    self.append_message(&format!("Set partials/channel to {}", new_value));
+                }
+            });
             
             // Voice count display with horizontal meters and thresholds
             ui.horizontal(|ui| {
@@ -921,15 +990,20 @@ impl eframe::App for OperationsGUI {
             });
             
             let voice_count = self.operations.read().unwrap().get_voice_count();
-            const NUM_PARTIALS: f32 = 12.0; // Number of partials per channel
+            let voice_cap = std::cmp::max(
+                1,
+                self.partials_per_channel.load(std::sync::atomic::Ordering::Relaxed) as i32,
+            );
+            let mut thresholds_changed = false;
             for (ch_idx, count) in voice_count.iter().enumerate() {
                 ui.horizontal(|ui| {
                     // Ensure we have enough elements in the vectors
                     if ch_idx >= self.voice_count_max.len() {
-                        self.voice_count_max.resize(ch_idx + 1, 12);
+                        self.voice_count_max.resize(ch_idx + 1, voice_cap);
                     }
                     if ch_idx >= self.voice_count_min.len() {
-                        self.voice_count_min.resize(ch_idx + 1, 2);
+                        let min_default = std::cmp::min(2, voice_cap);
+                        self.voice_count_min.resize(ch_idx + 1, min_default);
                     }
                     
                     // Left column: Channel label and meter
@@ -965,18 +1039,27 @@ impl eframe::App for OperationsGUI {
                         let mut min_val = self.voice_count_min[ch_idx];
                         
                         ui.label("min");
-                        ui.add(egui::DragValue::new(&mut min_val).clamp_range(0..=12));
+                        ui.add(egui::DragValue::new(&mut min_val).clamp_range(0..=voice_cap));
                         ui.label("max");
-                        ui.add(egui::DragValue::new(&mut max_val).clamp_range(0..=12));
+                        ui.add(egui::DragValue::new(&mut max_val).clamp_range(0..=voice_cap));
                         
                         if max_val != self.voice_count_max[ch_idx] {
                             self.voice_count_max[ch_idx] = max_val;
+                            thresholds_changed = true;
                         }
                         if min_val != self.voice_count_min[ch_idx] {
                             self.voice_count_min[ch_idx] = min_val;
+                            thresholds_changed = true;
+                        }
+                        if self.voice_count_min[ch_idx] > self.voice_count_max[ch_idx] {
+                            self.voice_count_min[ch_idx] = self.voice_count_max[ch_idx];
+                            thresholds_changed = true;
                         }
                     });
                 });
+            }
+            if thresholds_changed {
+                self.publish_voice_thresholds_to_logger();
             }
             
             ui.separator();
