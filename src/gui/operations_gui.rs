@@ -1039,19 +1039,13 @@ impl eframe::App for OperationsGUI {
                 }
                 
                 ui.label("max");
-                if ui.add(egui::DragValue::new(&mut global_max).clamp_range(0..=voice_cap)).changed() {
+                // Clamp max to be at least min, but don't change min
+                let max_clamp_min = global_min.max(0);
+                if ui.add(egui::DragValue::new(&mut global_max).clamp_range(max_clamp_min..=voice_cap)).changed() {
                     // Update all channels
                     self.voice_count_max.resize(string_num, global_max);
                     for val in self.voice_count_max.iter_mut() {
                         *val = global_max;
-                    }
-                    // Ensure min doesn't exceed max
-                    if global_min > global_max {
-                        global_min = global_max;
-                        self.voice_count_min.resize(string_num, global_min);
-                        for val in self.voice_count_min.iter_mut() {
-                            *val = global_min;
-                        }
                     }
                     self.publish_voice_thresholds_to_logger();
                     self.append_message(&format!("Global voice count max set to {} for all channels", global_max));
@@ -1158,7 +1152,7 @@ impl eframe::App for OperationsGUI {
                 let mut global_max = current_max;
                 
                 ui.label("min");
-                if ui.add(egui::DragValue::new(&mut global_min).clamp_range(0..=250)).changed() {
+                if ui.add(egui::DragValue::new(&mut global_min).clamp_range(0..=i32::MAX)).changed() {
                     // Update all channels
                     self.amp_sum_min.resize(string_num, global_min);
                     for val in self.amp_sum_min.iter_mut() {
@@ -1176,19 +1170,13 @@ impl eframe::App for OperationsGUI {
                 }
                 
                 ui.label("max");
-                if ui.add(egui::DragValue::new(&mut global_max).clamp_range(0..=250)).changed() {
+                // Clamp max to be at least min, but don't change min
+                let max_clamp_min = global_min.max(0);
+                if ui.add(egui::DragValue::new(&mut global_max).clamp_range(max_clamp_min..=i32::MAX)).changed() {
                     // Update all channels
                     self.amp_sum_max.resize(string_num, global_max);
                     for val in self.amp_sum_max.iter_mut() {
                         *val = global_max;
-                    }
-                    // Ensure min doesn't exceed max
-                    if global_min > global_max {
-                        global_min = global_max;
-                        self.amp_sum_min.resize(string_num, global_min);
-                        for val in self.amp_sum_min.iter_mut() {
-                            *val = global_min;
-                        }
                     }
                     self.append_message(&format!("Global amp sum max set to {} for all channels", global_max));
                 }
@@ -1237,9 +1225,9 @@ impl eframe::App for OperationsGUI {
                         let mut min_val = self.amp_sum_min[ch_idx];
                         
                         ui.label("min");
-                        ui.add(egui::DragValue::new(&mut min_val).clamp_range(0..=250));
+                        ui.add(egui::DragValue::new(&mut min_val).clamp_range(0..=i32::MAX));
                         ui.label("max");
-                        ui.add(egui::DragValue::new(&mut max_val).clamp_range(0..=250));
+                        ui.add(egui::DragValue::new(&mut max_val).clamp_range(0..=i32::MAX));
                         
                         if max_val != self.amp_sum_max[ch_idx] {
                             self.amp_sum_max[ch_idx] = max_val;
