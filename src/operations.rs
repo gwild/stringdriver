@@ -503,19 +503,31 @@ pub fn read_partials_from_shared_memory(num_channels: usize, mut num_partials_pe
             let voice_counts = calculate_voice_count(&partials);
             let amp_sums = calculate_amp_sum(&partials);
             
-            // Update voice_count
+            // Update voice_count - keep array size at string_num, only update channels that have data
             if let Ok(mut voice_count) = self.voice_count.lock() {
-                voice_count.resize(num_channels, 0);
-                for (ch_idx, &count) in voice_counts.iter().take(num_channels).enumerate() {
-                    voice_count[ch_idx] = count;
+                // Ensure array is at least string_num size
+                if voice_count.len() < self.string_num {
+                    voice_count.resize(self.string_num, 0);
+                }
+                // Update channels that have data
+                for ch_idx in 0..num_channels {
+                    if ch_idx < voice_counts.len() && ch_idx < voice_count.len() {
+                        voice_count[ch_idx] = voice_counts[ch_idx];
+                    }
                 }
             }
             
-            // Update amp_sum
+            // Update amp_sum - keep array size at string_num, only update channels that have data
             if let Ok(mut amp_sum) = self.amp_sum.lock() {
-                amp_sum.resize(num_channels, 0.0);
-                for (ch_idx, &sum) in amp_sums.iter().take(num_channels).enumerate() {
-                    amp_sum[ch_idx] = sum;
+                // Ensure array is at least string_num size
+                if amp_sum.len() < self.string_num {
+                    amp_sum.resize(self.string_num, 0.0);
+                }
+                // Update channels that have data
+                for ch_idx in 0..num_channels {
+                    if ch_idx < amp_sums.len() && ch_idx < amp_sum.len() {
+                        amp_sum[ch_idx] = amp_sums[ch_idx];
+                    }
                 }
             }
         }
