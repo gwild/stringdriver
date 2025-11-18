@@ -999,6 +999,65 @@ impl eframe::App for OperationsGUI {
                 });
             });
             
+            // Global Voice Count thresholds (sets all channels at once)
+            ui.horizontal(|ui| {
+                ui.label("Global Voice Count:");
+                let string_num = self.operations.read().unwrap().string_num;
+                
+                // Calculate current min/max across all channels for display
+                let current_min = if !self.voice_count_min.is_empty() {
+                    self.voice_count_min.iter().min().copied().unwrap_or(0)
+                } else {
+                    std::cmp::min(2, voice_cap)
+                };
+                let current_max = if !self.voice_count_max.is_empty() {
+                    self.voice_count_max.iter().max().copied().unwrap_or(voice_cap)
+                } else {
+                    voice_cap
+                };
+                
+                let mut global_min = current_min;
+                let mut global_max = current_max;
+                
+                ui.label("min");
+                if ui.add(egui::DragValue::new(&mut global_min).clamp_range(0..=voice_cap)).changed() {
+                    // Update all channels
+                    self.voice_count_min.resize(string_num, global_min);
+                    for val in self.voice_count_min.iter_mut() {
+                        *val = global_min;
+                    }
+                    // Ensure min doesn't exceed max
+                    if global_min > global_max {
+                        global_max = global_min;
+                        self.voice_count_max.resize(string_num, global_max);
+                        for val in self.voice_count_max.iter_mut() {
+                            *val = global_max;
+                        }
+                    }
+                    self.publish_voice_thresholds_to_logger();
+                    self.append_message(&format!("Global voice count min set to {} for all channels", global_min));
+                }
+                
+                ui.label("max");
+                if ui.add(egui::DragValue::new(&mut global_max).clamp_range(0..=voice_cap)).changed() {
+                    // Update all channels
+                    self.voice_count_max.resize(string_num, global_max);
+                    for val in self.voice_count_max.iter_mut() {
+                        *val = global_max;
+                    }
+                    // Ensure min doesn't exceed max
+                    if global_min > global_max {
+                        global_min = global_max;
+                        self.voice_count_min.resize(string_num, global_min);
+                        for val in self.voice_count_min.iter_mut() {
+                            *val = global_min;
+                        }
+                    }
+                    self.publish_voice_thresholds_to_logger();
+                    self.append_message(&format!("Global voice count max set to {} for all channels", global_max));
+                }
+            });
+            
             let voice_count = self.operations.read().unwrap().get_voice_count();
             let mut thresholds_changed = false;
             for (ch_idx, count) in voice_count.iter().enumerate() {
@@ -1076,6 +1135,63 @@ impl eframe::App for OperationsGUI {
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.label("Thresholds");
                 });
+            });
+            
+            // Global Amp Sum thresholds (sets all channels at once)
+            ui.horizontal(|ui| {
+                ui.label("Global Amp Sum:");
+                let string_num = self.operations.read().unwrap().string_num;
+                
+                // Calculate current min/max across all channels for display
+                let current_min = if !self.amp_sum_min.is_empty() {
+                    self.amp_sum_min.iter().min().copied().unwrap_or(20) as i32
+                } else {
+                    20
+                };
+                let current_max = if !self.amp_sum_max.is_empty() {
+                    self.amp_sum_max.iter().max().copied().unwrap_or(250) as i32
+                } else {
+                    250
+                };
+                
+                let mut global_min = current_min;
+                let mut global_max = current_max;
+                
+                ui.label("min");
+                if ui.add(egui::DragValue::new(&mut global_min).clamp_range(0..=250)).changed() {
+                    // Update all channels
+                    self.amp_sum_min.resize(string_num, global_min);
+                    for val in self.amp_sum_min.iter_mut() {
+                        *val = global_min;
+                    }
+                    // Ensure min doesn't exceed max
+                    if global_min > global_max {
+                        global_max = global_min;
+                        self.amp_sum_max.resize(string_num, global_max);
+                        for val in self.amp_sum_max.iter_mut() {
+                            *val = global_max;
+                        }
+                    }
+                    self.append_message(&format!("Global amp sum min set to {} for all channels", global_min));
+                }
+                
+                ui.label("max");
+                if ui.add(egui::DragValue::new(&mut global_max).clamp_range(0..=250)).changed() {
+                    // Update all channels
+                    self.amp_sum_max.resize(string_num, global_max);
+                    for val in self.amp_sum_max.iter_mut() {
+                        *val = global_max;
+                    }
+                    // Ensure min doesn't exceed max
+                    if global_min > global_max {
+                        global_min = global_max;
+                        self.amp_sum_min.resize(string_num, global_min);
+                        for val in self.amp_sum_min.iter_mut() {
+                            *val = global_min;
+                        }
+                    }
+                    self.append_message(&format!("Global amp sum max set to {} for all channels", global_max));
+                }
             });
             
             let amp_sum = self.operations.read().unwrap().get_amp_sum();
