@@ -426,40 +426,91 @@ impl Operations {
         format!("{}/audio_peaks", shm_dir)
     }
     
+    /// Get control file path for audio monitor metadata
+    /// Returns the path to the control file that contains channel count and partials info
+    fn get_control_file_path() -> String {
+        // Determine shared memory directory based on platform (same as shared memory)
+        let shm_dir = if cfg!(target_os = "linux") {
+            "/dev/shm"
+        } else if cfg!(target_os = "macos") {
+            "/tmp"
+        } else {
+            "/tmp"
+        };
+        format!("{}/audio_control", shm_dir)
+    }
+    
+    /// Read actual channel count and partials per channel from control file
+    /// Returns (num_channels, num_partials_per_channel) if file exists and is readable
+    /// Returns None if file doesn't exist or can't be read
+    fn read_control_file() -> Option<(usize, usize)> {
+        let control_path = Self::get_control_file_path();
+        let content = std::fs::read_to_string(&control_path).ok()?;
+        let lines: Vec<&str> = content.trim().split('\n').collect();
+        if lines.len() >= 3 {
+            // Format: PID\nnum_channels\nnum_partials
+            let num_channels = lines[1].parse::<usize>().ok()?;
+            let num_partials = lines[2].parse::<usize>().ok()?;
+            Some((num_channels, num_partials))
+        } else {
+            None
+        }
+    }
+    
     /// Read partials data from shared memory file
     /// Returns None if file doesn't exist or can't be read
     /// num_channels: number of channels to read (typically string_num)
-    /// num_partials_per_channel: number of partials per channel (typically 12)
-pub fn read_partials_from_shared_memory(num_channels: usize, mut num_partials_per_channel: usize) -> Option<PartialsData> {
+    /// num_partials_per_channel: number of partials per channel (hint, will be overridden by control file if available)
+    pub fn read_partials_from_shared_memory(num_channels: usize, mut num_partials_per_channel: usize) -> Option<PartialsData> {
         let shm_path = Self::get_shared_memory_path();
         
         // Try to open and read the shared memory file
         let file = OpenOptions::new().read(true).open(&shm_path).ok()?;
         let mmap = unsafe { Mmap::map(&file).ok()? };
         
-    // Deserialize bytes: each partial is (f32 freq, f32 amp) = 8 bytes
-    // Format: channel 0 partials, channel 1 partials, etc.
-    // Each channel has exactly num_partials_per_channel partials
-    const PARTIAL_SIZE: usize = 8; // 2 * f32 = 8 bytes
-    if num_channels > 0 {
-        let total_entries = mmap.len() / PARTIAL_SIZE;
-        let detected = total_entries / num_channels;
-        if detected > 0 {
-            num_partials_per_channel = detected;
+        // Deserialize bytes: each partial is (f32 freq, f32 amp) = 8 bytes
+        // Format: channel 0 partials, channel 1 partials, etc.
+        // Each channel has exactly num_partials_per_channel partials
+        const PARTIAL_SIZE: usize = 8; // 2 * f32 = 8 bytes
+        
+        // Read control file to get actual channel count and partials per channel written by audio_monitor
+        let (actual_channels_written, actual_partials_per_channel) = match Self::read_control_file() {
+            Some((ch, ppc)) => (ch, ppc),
+            None => {
+                // Fallback: try to detect from file size if control file not available
+                if num_channels > 0 {
+                    let total_entries = mmap.len() / PARTIAL_SIZE;
+                    let detected = total_entries / num_channels;
+                    if detected > 0 {
+                        (num_channels, detected) // Assume num_channels is correct if no control file
+                    } else {
+                        (num_channels, num_partials_per_channel) // Use hint
+                    }
+                } else {
+                    (num_channels, num_partials_per_channel) // Use hint
+                }
+            }
+        };
+        
+        // Use actual values from control file (or detected values)
+        num_partials_per_channel = actual_partials_per_channel;
+        
+        if num_partials_per_channel == 0 {
+            // Fallback to default of 12 if still zero
+            num_partials_per_channel = 12;
         }
-    }
-    let mut channel_size = num_partials_per_channel * PARTIAL_SIZE;
-    if channel_size == 0 {
-        // Fallback to default of 12 if still zero
-        num_partials_per_channel = 12;
-        channel_size = num_partials_per_channel * PARTIAL_SIZE;
-    }
+        
+        let channel_size = num_partials_per_channel * PARTIAL_SIZE;
+        
+        // Read min(actual_channels_written, num_channels) channels
+        // This respects the caller's request while not reading beyond what was written
+        let channels_to_read = actual_channels_written.min(num_channels);
         
         let mut partials = Vec::new();
         let mut offset = 0;
         
-        // Read exactly num_channels channels
-        for _ in 0..num_channels {
+        // Read exactly channels_to_read channels
+        for _ in 0..channels_to_read {
             if offset + channel_size > mmap.len() {
                 break; // Not enough data
             }
