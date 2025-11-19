@@ -960,15 +960,17 @@ impl eframe::App for StepperGUI {
             ];
 
             // Check if X stepper exists using X_STEP_INDEX from config
-            let x_offset = if let Some(x_idx) = self.x_step_index {
-                if x_idx < self.positions.len() && self.positions[x_idx] >= 0 {
-                    self.positions[x_idx] as f32 // Shift layout based on x-axis position
-                } else {
-                    0.0 // X stepper index out of range or invalid position
-                }
-            } else {
-                0.0 // No X stepper for this host
-            };
+            // COMMENTED OUT: X offset feature for Z stepper layout
+            // let x_offset = if let Some(x_idx) = self.x_step_index {
+            //     if x_idx < self.positions.len() && self.positions[x_idx] >= 0 {
+            //         self.positions[x_idx] as f32 // Shift layout based on x-axis position
+            //     } else {
+            //         0.0 // X stepper index out of range or invalid position
+            //     }
+            // } else {
+            //     0.0 // No X stepper for this host
+            // };
+            let x_offset = 0.0; // Feature disabled
 
             egui::ScrollArea::vertical().show(ui, |ui| {
                 // Layout steppers in pairs matching physical system:
@@ -984,10 +986,35 @@ impl eframe::App for StepperGUI {
                             // Read-only horizontal slider for visualization
                             // Use X_MAX_POS from config
                             if let Some(max_range) = self.x_max_pos {
-                                // Allocate wider space for slider (default slider width + 30 pixels)
+                                // Editable number box (moved to left of slider)
+                                let current_pos = self.positions[x_idx];
+                                let pending = self.pending_positions.entry(x_idx).or_insert(current_pos);
+                                let response = ui.add(egui::DragValue::new(pending)
+                                    .clamp_range(-100..=max_range)
+                                    .speed(10.0));
+                                
+                                let has_focus = response.has_focus();
+                                let lost_focus = response.lost_focus();
+                                let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                
+                                // Only send command when Enter is pressed (lost focus + Enter key)
+                                if lost_focus && enter_pressed {
+                                    let pending_value = *pending;
+                                    drop(pending); // Release borrow
+                                    let delta = pending_value - current_pos;
+                                    if delta != 0 {
+                                        self.move_stepper(x_idx, delta);
+                                    }
+                                    self.pending_positions.remove(&x_idx);
+                                } else if !has_focus && *pending != current_pos {
+                                    // Sync pending value when not editing
+                                    *pending = current_pos;
+                                }
+                                
+                                // Allocate wider space for slider (default slider width + 50 pixels: 30 + 20)
                                 // Use egui's default slider width, not available_width (which scales with window)
                                 let default_slider_width = ui.spacing().slider_width;
-                                let slider_width = default_slider_width + 30.0;
+                                let slider_width = default_slider_width + 50.0;
                                 let slider_height = ui.spacing().interact_size.y;
                                 
                                 // Allocate space for the slider
@@ -1031,31 +1058,6 @@ impl eframe::App for StepperGUI {
                                 
                                 // Skip adding the actual slider widget - we've drawn a custom one
                                 // The allocated space above provides the layout
-                                
-                                // Editable number box (like Z steppers)
-                                let current_pos = self.positions[x_idx];
-                                let pending = self.pending_positions.entry(x_idx).or_insert(current_pos);
-                                let response = ui.add(egui::DragValue::new(pending)
-                                    .clamp_range(-100..=max_range)
-                                    .speed(10.0));
-                                
-                                let has_focus = response.has_focus();
-                                let lost_focus = response.lost_focus();
-                                let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                
-                                // Only send command when Enter is pressed (lost focus + Enter key)
-                                if lost_focus && enter_pressed {
-                                    let pending_value = *pending;
-                                    drop(pending); // Release borrow
-                                    let delta = pending_value - current_pos;
-                                    if delta != 0 {
-                                        self.move_stepper(x_idx, delta);
-                                    }
-                                    self.pending_positions.remove(&x_idx);
-                                } else if !has_focus && *pending != current_pos {
-                                    // Sync pending value when not editing
-                                    *pending = current_pos;
-                                }
                             } else {
                                 // No X_MAX_POS configured - show position without slider
                                 ui.label(format!("Position: {}", pos));
@@ -1146,10 +1148,10 @@ impl eframe::App for StepperGUI {
                         let color = channel_colors[row % channel_colors.len()];
 
                         ui.horizontal(|ui| {
-                            // Apply horizontal offset based on x-axis carriage position
-                            if x_offset > 0.0 {
-                                ui.add_space(x_offset.min(500.0)); // Limit offset to reasonable screen space
-                            }
+                            // COMMENTED OUT: Apply horizontal offset based on x-axis carriage position
+                            // if x_offset > 0.0 {
+                            //     ui.add_space(x_offset.min(500.0)); // Limit offset to reasonable screen space
+                            // }
                             
                             // Left stepper ("out" stepper)
                             ui.vertical(|ui| {
