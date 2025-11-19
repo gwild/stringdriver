@@ -683,6 +683,8 @@ impl OperationsGUI {
         let mut positions = vec![0i32; max_idx + 1];
         for &idx in &all_indices {
             if idx < positions.len() {
+                // Use fresh position from snapshot if available, otherwise use 0 as fallback
+                // Note: This is a read-only initialization - actual positions come from Arduino
                 positions[idx] = positions_snapshot.get(&idx).copied().unwrap_or(0);
             }
         }

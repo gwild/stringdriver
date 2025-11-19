@@ -1260,19 +1260,21 @@ impl Operations {
         let mut messages = Vec::new();
         messages.push(format!("Starting right_left_move: X from {} to {} (step: {})", x_start, x_finish, x_step));
         
-        // Get current X position (may be stale - will be updated by refresh_positions after move)
-        let current_x_pos = positions.get(x_step_index).copied().unwrap_or(0);
+        // Read current X position from Arduino - Arduino is source of truth
+        let current_x_pos = positions.get(x_step_index).copied().ok_or_else(|| anyhow!("Failed to read X position from Arduino"))?;
+        messages.push(format!("Current X position from Arduino: {}", current_x_pos));
         
-        // Absolute move to x_start if not already there (calculate delta and use rel_move)
+        // Absolute move to x_start if not already there
         if current_x_pos != x_start {
-            messages.push(format!("Moving X to start position: {} (current: {})", x_start, current_x_pos));
-            let delta = x_start - current_x_pos;
-            self.rel_move_x(stepper_ops, x_step_index, delta)?;
-            // Position is updated by refresh_positions() - Arduino knows the position
+            messages.push(format!("Moving X to absolute position: {} (current: {})", x_start, current_x_pos));
+            stepper_ops.abs_move(x_step_index, x_start)?;
+            // Position is updated by refresh_positions() in stepper_gui - Arduino knows the position
+            // Note: local positions array will be updated when operations_gui polls stepper_gui
         }
         
         // Read current X position from Arduino (after move) - Arduino is source of truth
         let mut current_x = positions.get(x_step_index).copied().ok_or_else(|| anyhow!("Failed to read X position from Arduino"))?;
+        messages.push(format!("X position after initial move: {}", current_x));
         let step_direction = if x_finish > x_start { 1 } else { -1 };
         let abs_step = x_step.abs();
         
@@ -1317,13 +1319,30 @@ impl Operations {
                 // Run bump_check
                 let bump_msg = self.bump_check(None, positions, max_positions, stepper_ops, exit_flag)?;
                 
-                // Get current voice counts
+                // Get current voice counts and amp sums
                 let voice_counts = self.get_voice_count();
+                let amp_sums = self.get_amp_sum();
                 
-                // Check if we've met adjustment_level (all strings have voice_count >= adjustment_level)
-                let all_meet_level = voice_counts.iter().all(|&count| count >= adjustment_level as usize);
+                // Check if all channels are within their min/max ranges (green indicators)
+                // A pass is when voice_count AND amp_sum for all channels are within their ranges
+                let all_pass = (0..self.string_num).all(|string_idx| {
+                    if string_idx >= amp_sums.len() || string_idx >= voice_counts.len() {
+                        return false;
+                    }
+                    let amp_sum = amp_sums[string_idx];
+                    let voice_count = voice_counts[string_idx];
+                    
+                    let min_thresh = min_thresholds.get(string_idx).copied().unwrap_or(20.0);
+                    let max_thresh = max_thresholds.get(string_idx).copied().unwrap_or(100.0);
+                    let min_voice = min_voices.get(string_idx).copied().unwrap_or(0);
+                    let max_voice = max_voices.get(string_idx).copied().unwrap_or(12);
+                    
+                    // Check both amp_sum and voice_count are within their ranges
+                    amp_sum >= min_thresh && amp_sum <= max_thresh &&
+                    voice_count >= min_voice && voice_count <= max_voice
+                });
                 
-                if all_meet_level {
+                if all_pass {
                     // Successful pass - increment pass counter
                     pass_count += 1;
                     messages.push(format!("Pass {} of {} successful at X={} (attempt {})", pass_count, adjustment_level, current_x, attempts));
@@ -1420,19 +1439,21 @@ impl Operations {
         let mut messages = Vec::new();
         messages.push(format!("Starting left_right_move: X from {} to {} (step: {})", x_finish, x_start, x_step));
         
-        // Get current X position
-        let current_x_pos = positions.get(x_step_index).copied().unwrap_or(0);
+        // Read current X position from Arduino - Arduino is source of truth
+        let current_x_pos = positions.get(x_step_index).copied().ok_or_else(|| anyhow!("Failed to read X position from Arduino"))?;
+        messages.push(format!("Current X position from Arduino: {}", current_x_pos));
         
-        // Absolute move to x_finish if not already there (calculate delta and use rel_move)
+        // Absolute move to x_finish if not already there
         if current_x_pos != x_finish {
-            messages.push(format!("Moving X to start position: {} (current: {})", x_finish, current_x_pos));
-            let delta = x_finish - current_x_pos;
-            self.rel_move_x(stepper_ops, x_step_index, delta)?;
-            // Position is updated by refresh_positions() - Arduino knows the position
+            messages.push(format!("Moving X to absolute position: {} (current: {})", x_finish, current_x_pos));
+            stepper_ops.abs_move(x_step_index, x_finish)?;
+            // Position is updated by refresh_positions() in stepper_gui - Arduino knows the position
+            // Note: local positions array will be updated when operations_gui polls stepper_gui
         }
         
         // Read current X position from Arduino (after move) - Arduino is source of truth
         let mut current_x = positions.get(x_step_index).copied().ok_or_else(|| anyhow!("Failed to read X position from Arduino"))?;
+        messages.push(format!("X position after initial move: {}", current_x));
         let step_direction = if x_start > x_finish { 1 } else { -1 };
         let abs_step = x_step.abs();
         
@@ -1477,13 +1498,30 @@ impl Operations {
                 // Run bump_check
                 let bump_msg = self.bump_check(None, positions, max_positions, stepper_ops, exit_flag)?;
                 
-                // Get current voice counts
+                // Get current voice counts and amp sums
                 let voice_counts = self.get_voice_count();
+                let amp_sums = self.get_amp_sum();
                 
-                // Check if we've met adjustment_level (all strings have voice_count >= adjustment_level)
-                let all_meet_level = voice_counts.iter().all(|&count| count >= adjustment_level as usize);
+                // Check if all channels are within their min/max ranges (green indicators)
+                // A pass is when voice_count AND amp_sum for all channels are within their ranges
+                let all_pass = (0..self.string_num).all(|string_idx| {
+                    if string_idx >= amp_sums.len() || string_idx >= voice_counts.len() {
+                        return false;
+                    }
+                    let amp_sum = amp_sums[string_idx];
+                    let voice_count = voice_counts[string_idx];
+                    
+                    let min_thresh = min_thresholds.get(string_idx).copied().unwrap_or(20.0);
+                    let max_thresh = max_thresholds.get(string_idx).copied().unwrap_or(100.0);
+                    let min_voice = min_voices.get(string_idx).copied().unwrap_or(0);
+                    let max_voice = max_voices.get(string_idx).copied().unwrap_or(12);
+                    
+                    // Check both amp_sum and voice_count are within their ranges
+                    amp_sum >= min_thresh && amp_sum <= max_thresh &&
+                    voice_count >= min_voice && voice_count <= max_voice
+                });
                 
-                if all_meet_level {
+                if all_pass {
                     // Successful pass - increment pass counter
                     pass_count += 1;
                     messages.push(format!("Pass {} of {} successful at X={} (attempt {})", pass_count, adjustment_level, current_x, attempts));

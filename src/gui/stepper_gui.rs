@@ -26,6 +26,7 @@ struct Args {
 #[derive(Clone, Copy, Debug)]
 struct CommandSet {
     positions_cmd: &'static [u8],
+    amove_id: u8,
     rmove_id: u8,
     set_stepper_id: u8,
     set_accel_id: u8,
@@ -37,6 +38,7 @@ struct CommandSet {
 impl CommandSet {
     const fn new(
         positions_cmd: &'static [u8],
+        amove_id: u8,
         rmove_id: u8,
         set_stepper_id: u8,
         set_accel_id: u8,
@@ -46,6 +48,7 @@ impl CommandSet {
     ) -> Self {
         Self {
             positions_cmd,
+            amove_id,
             rmove_id,
             set_stepper_id,
             set_accel_id,
@@ -57,8 +60,8 @@ impl CommandSet {
 
     fn for_firmware(firmware: ArduinoFirmware) -> Self {
         match firmware {
-            ArduinoFirmware::StringDriverV1 => CommandSet::new(b"2;", 4, 7, 8, 9, 10, 11),
-            ArduinoFirmware::StringDriverV2 => CommandSet::new(b"1;", 3, 6, 7, 8, 9, 10),
+            ArduinoFirmware::StringDriverV1 => CommandSet::new(b"2;", 2, 4, 7, 8, 9, 10, 11),
+            ArduinoFirmware::StringDriverV2 => CommandSet::new(b"1;", 2, 3, 6, 7, 8, 9, 10),
         }
     }
 }
@@ -233,7 +236,7 @@ impl StepperGUI {
                 if parts.len() == 3 {
                     if let (Ok(stepper), Ok(position)) = (parts[1].parse::<usize>(), parts[2].parse::<i32>()) {
                         self.log(&format!("IPC: abs_move {} {}", stepper, position));
-                        self.set_position(stepper, position);
+                        self.move_stepper_absolute_with_source("IPC", stepper, position);
                     }
                 }
             }
@@ -576,18 +579,23 @@ impl StepperGUI {
         self.refresh_positions();
     }
 
-    fn set_position(&mut self, stepper: usize, position: i32) {
-        // CRITICAL: This is MODEL ONLY - updates internal position tracking variable
-        // Does NOT send physical move command to Arduino
-        // Real-world position comes from Arduino via refresh_positions() which calibrates the model
-        // This maintains a parallel model that requires periodic calibration to reality
-        let clamped = position.clamp(-100, 100);
-        if stepper < self.positions.len() {
-            self.positions[stepper] = clamped;
-            self.log(&format!(">>> MODEL: Updated internal position for stepper {} to {} (code variable only, no physical move)", stepper, clamped));
-        } else {
-            self.log(&format!("ERROR: Stepper index {} out of range", stepper));
+    fn move_stepper_absolute_with_source(&mut self, source: &str, stepper: usize, position: i32) {
+        if self.port.is_none() {
+            self.log(&format!("ERROR: Cannot move - port not connected"));
+            return;
         }
+        // Flush input before command (mirror Python's flush_input_before_command)
+        if let Some(p) = self.port.as_mut() {
+            let _ = p.clear(serialport::ClearBuffer::Input);
+        }
+        let s = stepper as i16;
+        self.log(&format!(">>> {} MOVING stepper {} to absolute position {} (amove command)", source, stepper, position));
+        self.send_cmd_bin(self.command_set.amove_id, s, position);
+        self.log(&format!("Command sent, waiting for Arduino..."));
+        // Arduino move is synchronous - wait for it to complete
+        thread::sleep(Duration::from_millis(500));
+        self.log(&format!("Refreshing positions..."));
+        self.refresh_positions();
     }
 
     fn reset_position(&mut self, stepper: usize, position: i32) {
@@ -1209,7 +1217,8 @@ impl eframe::App for StepperGUI {
                                         self.log(&format!("DEBUG Enter pressed for left_idx={}: pending_value={}, current_pos={}", 
                                             left_idx, pending_value, current_pos));
                                         let clamped = pending_value.clamp(-100, 100);
-                                        self.set_position(left_idx, clamped);
+                                        // Move stepper to absolute position - Arduino is source of truth
+                                        self.move_stepper_absolute_with_source("UI", left_idx, clamped);
                                         self.pending_positions.insert(left_idx, clamped);
                                     } else {
                                         // Only sync pending value if user is NOT editing (widget not focused)
@@ -1289,7 +1298,8 @@ impl eframe::App for StepperGUI {
                                         self.log(&format!("DEBUG Enter pressed for right_idx={}: pending_value={}, current_pos={}", 
                                             right_idx, pending_value, current_pos));
                                         let clamped = pending_value.clamp(-100, 100);
-                                        self.set_position(right_idx, clamped);
+                                        // Move stepper to absolute position - Arduino is source of truth
+                                        self.move_stepper_absolute_with_source("UI", right_idx, clamped);
                                         self.pending_positions.insert(right_idx, clamped);
                                     } else {
                                         // Only sync pending value if user is NOT editing (widget not focused)
