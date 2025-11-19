@@ -158,6 +158,17 @@ fn main() {
         }
     }
     
+    // Wait for stepper_gui socket to be ready before launching operations_gui
+    println!("\nWaiting for stepper_gui socket to be ready...");
+    let socket_ready = wait_for_stepper_socket(&project_root);
+    if !socket_ready {
+        eprintln!("⚠ Warning: Timeout waiting for stepper_gui socket");
+        eprintln!("  stepper_gui may not be running correctly");
+        eprintln!("  Continuing anyway to launch operations_gui...");
+    } else {
+        println!("✓ stepper_gui socket verified - ready for operations_gui");
+    }
+    
     // Launch operations_gui
     println!("\nLaunching operations_gui...");
     let operations_gui = release_dir.join("operations_gui");
@@ -264,6 +275,77 @@ fn wait_for_shared_memory() -> bool {
         if attempt < MAX_ATTEMPTS {
             std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
             if attempt % 10 == 0 {
+                print!(".");
+                std::io::stdout().flush().ok();
+            }
+        }
+    }
+    
+    false
+}
+
+/// Get socket path for stepper_gui based on Arduino port
+fn get_stepper_socket_path(project_root: &std::path::Path) -> Option<String> {
+    let yaml_path = project_root.join("string_driver.yaml");
+    let file = match std::fs::File::open(&yaml_path) {
+        Ok(f) => f,
+        Err(_) => return None,
+    };
+    
+    let yaml: serde_yaml::Value = match serde_yaml::from_reader(file) {
+        Ok(y) => y,
+        Err(_) => return None,
+    };
+    
+    let hostname = gethostname().to_string_lossy().to_string();
+    
+    // Search across known OS sections to find a host block matching hostname
+    for os_key in ["RaspberryPi", "Ubuntu", "macOS"].iter() {
+        if let Some(os_map) = yaml.get(*os_key).and_then(|v| v.as_mapping()) {
+            for (k, v) in os_map.iter() {
+                if k.as_str() == Some(&hostname) {
+                    if let Some(host_block) = v.as_mapping() {
+                        // Get ARD_PORT
+                        if let Some(ard_port) = host_block.get(&serde_yaml::Value::from("ARD_PORT")) {
+                            if let Some(port_str) = ard_port.as_str() {
+                                // Generate socket path same way as stepper_gui.rs
+                                let port_id = port_str.replace("/", "_").replace("\\", "_");
+                                return Some(format!("/tmp/stepper_gui_{}.sock", port_id));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    None
+}
+
+/// Wait for stepper_gui socket to exist (event-driven polling)
+/// Returns true if socket exists, false if timeout
+fn wait_for_stepper_socket(project_root: &std::path::Path) -> bool {
+    let socket_path = match get_stepper_socket_path(project_root) {
+        Some(path) => path,
+        None => {
+            eprintln!("  Could not determine socket path from config");
+            return false;
+        }
+    };
+    
+    println!("  Checking socket at: {}", socket_path);
+    
+    const MAX_ATTEMPTS: u32 = 30; // 30 attempts
+    const POLL_INTERVAL_MS: u64 = 200; // Check every 200ms
+    
+    for attempt in 1..=MAX_ATTEMPTS {
+        if Path::new(&socket_path).exists() {
+            return true;
+        }
+        
+        if attempt < MAX_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+            if attempt % 5 == 0 {
                 print!(".");
                 std::io::stdout().flush().ok();
             }

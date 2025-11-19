@@ -103,6 +103,7 @@ struct StepperGUI {
     firmware: ArduinoFirmware,
     command_set: CommandSet,
     tuner_command_set: CommandSet,
+    x_max_pos: Option<i32>, // X_MAX_POS from config for slider range
 }
 
 impl Default for StepperGUI {
@@ -143,6 +144,7 @@ impl Default for StepperGUI {
             firmware: ArduinoFirmware::StringDriverV2,
             command_set: CommandSet::for_firmware(ArduinoFirmware::StringDriverV2),
             tuner_command_set: CommandSet::for_firmware(ArduinoFirmware::StringDriverV2),
+            x_max_pos: None,
         }
     }
 }
@@ -160,7 +162,7 @@ impl StepperGUI {
         stream.flush()
     }
 
-    fn new(port_path: String, num_steppers: usize, string_num: usize, x_step_index: Option<usize>, z_first_index: Option<usize>, tuner_first_index: Option<usize>, tuner_port_path: Option<String>, tuner_num_steppers: Option<usize>, debug: bool, debug_file: Option<File>, z_up_step: i32, z_down_step: i32, firmware: ArduinoFirmware) -> Self {
+    fn new(port_path: String, num_steppers: usize, string_num: usize, x_step_index: Option<usize>, z_first_index: Option<usize>, tuner_first_index: Option<usize>, tuner_port_path: Option<String>, tuner_num_steppers: Option<usize>, debug: bool, debug_file: Option<File>, z_up_step: i32, z_down_step: i32, firmware: ArduinoFirmware, x_max_pos: Option<i32>) -> Self {
         let mut s = Self::default();
         s.port_path = port_path;
         s.positions = vec![0; num_steppers];
@@ -207,6 +209,7 @@ impl StepperGUI {
         // Generate socket path from port path
         let port_id = s.port_path.replace("/", "_").replace("\\", "_");
         s.socket_path = format!("/tmp/stepper_gui_{}.sock", port_id);
+        s.x_max_pos = x_max_pos;
         s
     }
     
@@ -979,8 +982,83 @@ impl eframe::App for StepperGUI {
                             ui.label(&format!("X-axis (Stepper {}):", x_idx));
                             let mut pos = self.positions[x_idx];
                             // Read-only horizontal slider for visualization
-                            ui.add_enabled(false, egui::Slider::new(&mut pos, -100..=2600));
-                            ui.label(format!("{}", pos));
+                            // Use X_MAX_POS from config
+                            if let Some(max_range) = self.x_max_pos {
+                                // Allocate wider space for slider (default width + 30 pixels)
+                                let default_slider_width = ui.available_width();
+                                let slider_width = default_slider_width + 30.0;
+                                let slider_height = ui.spacing().interact_size.y;
+                                
+                                // Allocate space for the slider
+                                let slider_response = ui.allocate_response(
+                                    egui::vec2(slider_width, slider_height),
+                                    egui::Sense::hover()
+                                );
+                                
+                                // Draw custom slider with white indicator
+                                let slider_rect = slider_response.rect;
+                                let painter = ui.painter();
+                                
+                                // Draw slider track background
+                                let track_height = 4.0;
+                                let track_rect = egui::Rect::from_center_size(
+                                    slider_rect.center(),
+                                    egui::vec2(slider_rect.width(), track_height)
+                                );
+                                painter.rect_filled(track_rect, 2.0, egui::Color32::from_gray(60));
+                                
+                                // Calculate normalized position (0.0 to 1.0)
+                                let normalized_pos = (pos as f32 + 100.0) / (max_range as f32 + 100.0);
+                                let normalized_pos = normalized_pos.clamp(0.0, 1.0);
+                                
+                                // Draw filled portion (position indicator)
+                                let fill_width = slider_rect.width() * normalized_pos;
+                                let fill_rect = egui::Rect::from_min_size(
+                                    slider_rect.min,
+                                    egui::vec2(fill_width, track_height)
+                                );
+                                painter.rect_filled(fill_rect, 2.0, egui::Color32::from_gray(120));
+                                
+                                // Draw white indicator circle
+                                let indicator_x = slider_rect.min.x + fill_width;
+                                let indicator_y = slider_rect.center().y;
+                                painter.circle_filled(
+                                    egui::pos2(indicator_x, indicator_y),
+                                    6.0,
+                                    egui::Color32::WHITE
+                                );
+                                
+                                // Skip adding the actual slider widget - we've drawn a custom one
+                                // The allocated space above provides the layout
+                                
+                                // Editable number box (like Z steppers)
+                                let current_pos = self.positions[x_idx];
+                                let pending = self.pending_positions.entry(x_idx).or_insert(current_pos);
+                                let response = ui.add(egui::DragValue::new(pending)
+                                    .clamp_range(-100..=max_range)
+                                    .speed(10.0));
+                                
+                                let has_focus = response.has_focus();
+                                let lost_focus = response.lost_focus();
+                                let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                
+                                // Only send command when Enter is pressed (lost focus + Enter key)
+                                if lost_focus && enter_pressed {
+                                    let pending_value = *pending;
+                                    drop(pending); // Release borrow
+                                    let delta = pending_value - current_pos;
+                                    if delta != 0 {
+                                        self.move_stepper(x_idx, delta);
+                                    }
+                                    self.pending_positions.remove(&x_idx);
+                                } else if !has_focus && *pending != current_pos {
+                                    // Sync pending value when not editing
+                                    *pending = current_pos;
+                                }
+                            } else {
+                                // No X_MAX_POS configured - show position without slider
+                                ui.label(format!("Position: {}", pos));
+                            }
                         });
                         
                         // X stepper parameter controls in narrow rows
@@ -1388,6 +1466,20 @@ fn main() {
         Err(e) => panic!("Missing/invalid Arduino settings in YAML for host '{}': {}", hostname, e),
     };
 
+    // Calculate default x_finish: X_MAX_POS - 100
+    let default_x_finish = if let Some(max_pos) = settings.x_max_pos {
+        if max_pos > 0 {
+            max_pos - 100
+        } else {
+            100
+        }
+    } else {
+        100
+    };
+    
+    // Use X_MAX_POS for X slider max range
+    let x_slider_max: Option<i32> = settings.x_max_pos;
+    
     // Load operations settings for z_up_step and z_down_step
     let ops_settings = match config_loader::load_operations_settings(&hostname) {
         Ok(s) => s,
@@ -1405,8 +1497,8 @@ fn main() {
                 retry_threshold: Some(50),
                 delta_threshold: Some(50),
                 z_variance_threshold: Some(50),
-                x_start: Some(0),
-                x_finish: Some(100),
+                x_start: Some(100),
+                x_finish: Some(default_x_finish),
                 x_step: Some(10),
             }
         }
@@ -1436,7 +1528,8 @@ fn main() {
         debug_file,
         z_up_step,
         z_down_step,
-        settings.firmware
+        settings.firmware,
+        x_slider_max // Use GPIO_MAX_STEPS for slider range
     );
     
     // Auto-connect on startup (mirror Python's automatic arduino_init)

@@ -126,18 +126,31 @@ impl Operations {
         let delta_threshold = ops_settings.delta_threshold.unwrap_or(50);
         let z_variance_threshold = ops_settings.z_variance_threshold.unwrap_or(50);
         
-        // Load X movement parameters from operations settings (from YAML - defaults)
-        let x_start = ops_settings.x_start.unwrap_or(0);
-        let x_finish = ops_settings.x_finish.unwrap_or(100);
-        let x_step = ops_settings.x_step.unwrap_or(10);
-        
         // Load GPIO if available (required for z_calibration and bump_check)
         let gpio_settings = load_gpio_settings(&hostname)?;
+        // Get GPIO_MAX_STEPS for default X range calculation before moving gpio_settings
+        let gpio_max_steps = gpio_settings.as_ref().and_then(|gs| gs.max_steps).map(|v| v as i32);
         let gpio = gpio_settings.map(|_| crate::gpio::GpioBoard::new()).transpose()?;
         let arduino_connected = ard_settings.num_steppers > 0;
         
         let x_step_index = ard_settings.x_step_index;
         let x_max_pos = ard_settings.x_max_pos;
+        
+        // Load X movement parameters from operations settings (from YAML - defaults)
+        // Default x_start = 100, x_finish = X_MAX_POS - 100
+        let default_x_finish = if let Some(max_pos) = x_max_pos {
+            if max_pos > 0 {
+                max_pos - 100
+            } else {
+                100
+            }
+        } else {
+            100
+        };
+        
+        let x_start = ops_settings.x_start.unwrap_or(100);
+        let x_finish = ops_settings.x_finish.unwrap_or(default_x_finish);
+        let x_step = ops_settings.x_step.unwrap_or(10);
         let tuner_indices = mainboard_tuner_indices(&ard_settings);
         
         // Initialize stepper enabled states (all enabled by default)
