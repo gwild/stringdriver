@@ -1594,9 +1594,8 @@ impl Operations {
         let current_x_pos = positions.get(x_step_index).copied().unwrap_or(0);
         messages.push(format!("Current X position: {}", current_x_pos));
         
-        // Move toward home (negative direction) in small steps until limit is hit
+        // Move toward home (negative direction) in -10 step increments until GPIO trigger
         const STEP_SIZE: i32 = -10; // Move 10 steps toward home at a time
-        let mut moved = false;
         let mut iterations = 0;
         const MAX_ITERATIONS: u32 = 1000; // Safety limit
         
@@ -1609,18 +1608,18 @@ impl Operations {
                 }
             }
             
-            // Check if we've hit the limit using existing GPIO function
+            // Check if we've hit the GPIO trigger (home limit)
             let at_home = gpio.x_home_check().unwrap_or(false);
             
             if at_home {
-                messages.push("Home limit reached".to_string());
+                messages.push("Home GPIO trigger detected".to_string());
                 // Reset position to 0 at home (home is the reference point)
                 stepper_ops.reset(x_step_index, 0)?;
                 if let Some(pos) = positions.get_mut(x_step_index) {
                     *pos = 0;
                 }
                 messages.push("X position reset to 0 at home".to_string());
-                break;
+                break; // Exit loop after resetting to 0
             }
             
             // Safety check
@@ -1629,12 +1628,11 @@ impl Operations {
                 break;
             }
             
-            // Move one step toward home
+            // Move -10 steps toward home
             self.rel_move_x(stepper_ops, x_step_index, STEP_SIZE)?;
             if let Some(pos) = positions.get_mut(x_step_index) {
                 *pos += STEP_SIZE;
             }
-            moved = true;
             iterations += 1;
             
             if iterations % 10 == 0 {
@@ -1642,11 +1640,17 @@ impl Operations {
             }
         }
         
-        if moved {
-            let final_pos = positions.get(x_step_index).copied().unwrap_or(0);
-            messages.push(format!("X Home complete - final position: {}", final_pos));
+        // Verify we're at home with position 0, if not disable stepper
+        let final_pos = positions.get(x_step_index).copied().unwrap_or(0);
+        let still_at_home = gpio.x_home_check().unwrap_or(false);
+        
+        if final_pos == 0 && still_at_home {
+            messages.push(format!("X Home complete - position: {}, verified at home", final_pos));
         } else {
-            messages.push("X Home complete - already at home or no movement needed".to_string());
+            messages.push(format!("X Home failed - position: {}, at_home: {}", final_pos, still_at_home));
+            messages.push("Disabling X stepper due to home failure".to_string());
+            self.set_stepper_enabled(x_step_index, false);
+            stepper_ops.disable(x_step_index)?;
         }
         
         Ok(messages.join("\n"))
@@ -1675,18 +1679,21 @@ impl Operations {
         let mut messages = Vec::new();
         messages.push("Starting X Away operation...".to_string());
         
-        // Check if we have away limit detection
-        if gpio.x_away_line.is_none() {
-            return Ok("No X away limit switch configured".to_string());
+        // Get max position - required for this operation
+        let x_max_pos = self.x_max_pos.ok_or_else(|| anyhow!("X_MAX_POS not configured"))?;
+        if x_max_pos <= 0 {
+            return Ok("X_MAX_POS is invalid (must be > 0) - operation skipped".to_string());
         }
         
-        // Get current X position
-        let current_x_pos = positions.get(x_step_index).copied().unwrap_or(0);
-        messages.push(format!("Current X position: {}", current_x_pos));
+        // Set X to 0 first
+        stepper_ops.reset(x_step_index, 0)?;
+        if let Some(pos) = positions.get_mut(x_step_index) {
+            *pos = 0;
+        }
+        messages.push("X position set to 0".to_string());
         
-        // Move toward away (positive direction) in small steps until limit is hit
+        // Move toward away (positive direction) in +10 step increments until max pos or GPIO trigger
         const STEP_SIZE: i32 = 10; // Move 10 steps toward away at a time
-        let mut moved = false;
         let mut iterations = 0;
         const MAX_ITERATIONS: u32 = 1000; // Safety limit
         
@@ -1699,11 +1706,19 @@ impl Operations {
                 }
             }
             
-            // Check if we've hit the limit using existing GPIO function
-            let at_away = gpio.x_away_check().unwrap_or(false);
+            // Get current position
+            let current_pos = positions.get(x_step_index).copied().unwrap_or(0);
             
+            // Check if we've reached max position
+            if current_pos >= x_max_pos {
+                messages.push(format!("Max position ({}) reached", x_max_pos));
+                break;
+            }
+            
+            // Check if we've hit the GPIO trigger (away limit)
+            let at_away = gpio.x_away_check().unwrap_or(false);
             if at_away {
-                messages.push("Away limit reached".to_string());
+                messages.push("Away GPIO trigger detected".to_string());
                 break;
             }
             
@@ -1713,24 +1728,35 @@ impl Operations {
                 break;
             }
             
-            // Move one step toward away
+            // Move +10 steps toward away
             self.rel_move_x(stepper_ops, x_step_index, STEP_SIZE)?;
             if let Some(pos) = positions.get_mut(x_step_index) {
                 *pos += STEP_SIZE;
             }
-            moved = true;
             iterations += 1;
             
             if iterations % 10 == 0 {
-                messages.push(format!("Moving toward away... (iteration {})", iterations));
+                messages.push(format!("Moving toward away... (iteration {}, position: {})", iterations, current_pos + STEP_SIZE));
             }
         }
         
-        if moved {
-            let final_pos = positions.get(x_step_index).copied().unwrap_or(0);
-            messages.push(format!("X Away complete - final position: {}", final_pos));
+        // Check final state: if max pos reached without GPIO, disable stepper; else set to max pos
+        let final_pos = positions.get(x_step_index).copied().unwrap_or(0);
+        let at_away_gpio = gpio.x_away_check().unwrap_or(false);
+        
+        if final_pos >= x_max_pos && !at_away_gpio {
+            // Reached max position without GPIO trigger - disable stepper
+            messages.push(format!("X Away failed - reached max position ({}) without GPIO trigger", x_max_pos));
+            messages.push("Disabling X stepper due to away failure".to_string());
+            self.set_stepper_enabled(x_step_index, false);
+            stepper_ops.disable(x_step_index)?;
         } else {
-            messages.push("X Away complete - already at away or no movement needed".to_string());
+            // GPIO trigger hit - set X to max pos
+            stepper_ops.reset(x_step_index, x_max_pos)?;
+            if let Some(pos) = positions.get_mut(x_step_index) {
+                *pos = x_max_pos;
+            }
+            messages.push(format!("X Away complete - position set to max: {}", x_max_pos));
         }
         
         Ok(messages.join("\n"))
