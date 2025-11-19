@@ -173,6 +173,9 @@ pub struct OperationsSettings {
     pub retry_threshold: Option<i32>,
     pub delta_threshold: Option<i32>,
     pub z_variance_threshold: Option<i32>,
+    pub x_start: Option<i32>,
+    pub x_finish: Option<i32>,
+    pub x_step: Option<i32>,
 }
 
 /// Load operations settings for a given hostname from string_driver.yaml.
@@ -243,6 +246,18 @@ pub fn load_operations_settings(hostname: &str) -> Result<OperationsSettings> {
         .and_then(|v| v.as_i64())
         .map(|v| v as i32);
 
+    let x_start = host_block.get(&serde_yaml::Value::from("X_START"))
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
+
+    let x_finish = host_block.get(&serde_yaml::Value::from("X_FINISH"))
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
+
+    let x_step = host_block.get(&serde_yaml::Value::from("X_STEP"))
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
+
     Ok(OperationsSettings {
         z_up_step,
         z_down_step,
@@ -255,6 +270,9 @@ pub fn load_operations_settings(hostname: &str) -> Result<OperationsSettings> {
         retry_threshold,
         delta_threshold,
         z_variance_threshold,
+        x_start,
+        x_finish,
+        x_step,
     })
 }
 

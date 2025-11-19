@@ -626,19 +626,32 @@ impl OperationsGUI {
             "z_calibrate" => self.append_message("Executing Z Calibrate..."),
             "z_adjust" => self.append_message("Executing Z Adjust..."),
             "bump_check" => self.append_message("Executing Bump Check..."),
+            "right_left_move" => self.append_message("Executing Right Left Move..."),
+            "left_right_move" => self.append_message("Executing Left Right Move..."),
+            "x_home" => self.append_message("Executing X Home..."),
+            "x_away" => self.append_message("Executing X Away..."),
+            "x_calibrate" => self.append_message("Executing X Calibrate..."),
             _ => {
                 self.append_message("No operation selected");
                 return;
             }
         }
 
-        let max_idx = z_indices.iter().max().copied().unwrap_or(0);
+        // Get all stepper indices including X stepper for position tracking
+        let ops_guard = self.operations.read().unwrap();
+        let mut all_indices = z_indices.clone();
+        if let Some(x_idx) = ops_guard.x_step_index() {
+            all_indices.push(x_idx);
+        }
+        drop(ops_guard);
+        
+        let max_idx = all_indices.iter().max().copied().unwrap_or(0);
         let mut positions = vec![0i32; max_idx + 1];
         let current_positions_snapshot = self.stepper_positions
             .lock()
             .map(|map| map.clone())
             .unwrap_or_default();
-        for &idx in &z_indices {
+        for &idx in &all_indices {
             if idx < positions.len() {
                 positions[idx] = current_positions_snapshot.get(&idx).copied().unwrap_or(0);
             }
@@ -708,6 +721,41 @@ impl OperationsGUI {
                         &mut *stepper_client,
                         Some(&exit_flag),
                     ),
+                    "right_left_move" => ops_guard.right_left_move(
+                        &mut *stepper_client,
+                        &mut local_positions,
+                        &max_positions,
+                        &min_thresholds,
+                        &max_thresholds,
+                        &min_voices,
+                        &max_voices,
+                        Some(&exit_flag),
+                    ),
+                    "left_right_move" => ops_guard.left_right_move(
+                        &mut *stepper_client,
+                        &mut local_positions,
+                        &max_positions,
+                        &min_thresholds,
+                        &max_thresholds,
+                        &min_voices,
+                        &max_voices,
+                        Some(&exit_flag),
+                    ),
+                    "x_home" => ops_guard.x_home(
+                        &mut *stepper_client,
+                        &mut local_positions,
+                        Some(&exit_flag),
+                    ),
+                    "x_away" => ops_guard.x_away(
+                        &mut *stepper_client,
+                        &mut local_positions,
+                        Some(&exit_flag),
+                    ),
+                    "x_calibrate" => ops_guard.x_calibrate(
+                        &mut *stepper_client,
+                        &mut local_positions,
+                        Some(&exit_flag),
+                    ),
                     _ => Err(anyhow::anyhow!("Unsupported operation")),
                 }
             };
@@ -730,7 +778,15 @@ impl OperationsGUI {
             };
 
             let mut updated_positions = std::collections::HashMap::new();
-            for &idx in &z_indices_clone {
+            // Update positions for all steppers (Z and X)
+            let ops_guard_for_update = operations.read().unwrap();
+            let mut all_indices_for_update = z_indices_clone.clone();
+            if let Some(x_idx) = ops_guard_for_update.x_step_index() {
+                all_indices_for_update.push(x_idx);
+            }
+            drop(ops_guard_for_update);
+            
+            for &idx in &all_indices_for_update {
                 if idx < local_positions.len() {
                     updated_positions.insert(idx, local_positions[idx]);
                 }
@@ -933,6 +989,39 @@ impl eframe::App for OperationsGUI {
                 if ui.add(drag).changed() {
                     self.operations.read().unwrap().set_z_variance_threshold(z_variance_threshold);
                     self.append_message(&format!("Z variance threshold set to {}", z_variance_threshold));
+                }
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("X Start:");
+                let mut x_start = self.operations.read().unwrap().get_x_start();
+                let mut drag = egui::DragValue::new(&mut x_start);
+                drag = drag.clamp_range(-10000..=10000);
+                if ui.add(drag).changed() {
+                    self.operations.read().unwrap().set_x_start(x_start);
+                    self.append_message(&format!("X start set to {}", x_start));
+                }
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("X Finish:");
+                let mut x_finish = self.operations.read().unwrap().get_x_finish();
+                let mut drag = egui::DragValue::new(&mut x_finish);
+                drag = drag.clamp_range(-10000..=10000);
+                if ui.add(drag).changed() {
+                    self.operations.read().unwrap().set_x_finish(x_finish);
+                    self.append_message(&format!("X finish set to {}", x_finish));
+                }
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("X Step:");
+                let mut x_step = self.operations.read().unwrap().get_x_step();
+                let mut drag = egui::DragValue::new(&mut x_step);
+                drag = drag.clamp_range(1..=1000);
+                if ui.add(drag).changed() {
+                    self.operations.read().unwrap().set_x_step(x_step);
+                    self.append_message(&format!("X step set to {}", x_step));
                 }
             });
             
@@ -1361,6 +1450,11 @@ impl eframe::App for OperationsGUI {
                         ui.selectable_value(&mut self.selected_operation, "z_calibrate".to_string(), "Z Calibrate");
                         ui.selectable_value(&mut self.selected_operation, "z_adjust".to_string(), "Z Adjust");
                         ui.selectable_value(&mut self.selected_operation, "bump_check".to_string(), "Bump Check");
+                        ui.selectable_value(&mut self.selected_operation, "right_left_move".to_string(), "Right Left Move");
+                        ui.selectable_value(&mut self.selected_operation, "left_right_move".to_string(), "Left Right Move");
+                        ui.selectable_value(&mut self.selected_operation, "x_home".to_string(), "X Home");
+                        ui.selectable_value(&mut self.selected_operation, "x_away".to_string(), "X Away");
+                        ui.selectable_value(&mut self.selected_operation, "x_calibrate".to_string(), "X Calibrate");
                     });
                 
                 ui.horizontal(|ui| {

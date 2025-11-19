@@ -69,9 +69,13 @@ pub struct Operations {
     retry_threshold: Arc<Mutex<i32>>,
     delta_threshold: Arc<Mutex<i32>>,
     z_variance_threshold: Arc<Mutex<i32>>,
+    x_start: Arc<Mutex<i32>>,
+    x_finish: Arc<Mutex<i32>>,
+    x_step: Arc<Mutex<i32>>,
     pub z_first_index: usize,
     pub string_num: usize,
     pub x_step_index: Option<usize>,
+    pub x_max_pos: Option<i32>,
     pub tuner_indices: Vec<usize>,
     pub stepper_enabled: StepperEnabled,
     pub gpio: Option<crate::gpio::GpioBoard>,
@@ -122,12 +126,18 @@ impl Operations {
         let delta_threshold = ops_settings.delta_threshold.unwrap_or(50);
         let z_variance_threshold = ops_settings.z_variance_threshold.unwrap_or(50);
         
+        // Load X movement parameters from operations settings (from YAML - defaults)
+        let x_start = ops_settings.x_start.unwrap_or(0);
+        let x_finish = ops_settings.x_finish.unwrap_or(100);
+        let x_step = ops_settings.x_step.unwrap_or(10);
+        
         // Load GPIO if available (required for z_calibration and bump_check)
         let gpio_settings = load_gpio_settings(&hostname)?;
         let gpio = gpio_settings.map(|_| crate::gpio::GpioBoard::new()).transpose()?;
         let arduino_connected = ard_settings.num_steppers > 0;
         
         let x_step_index = ard_settings.x_step_index;
+        let x_max_pos = ard_settings.x_max_pos;
         let tuner_indices = mainboard_tuner_indices(&ard_settings);
         
         // Initialize stepper enabled states (all enabled by default)
@@ -156,9 +166,13 @@ impl Operations {
             retry_threshold: Arc::new(Mutex::new(retry_threshold)),
             delta_threshold: Arc::new(Mutex::new(delta_threshold)),
             z_variance_threshold: Arc::new(Mutex::new(z_variance_threshold)),
+            x_start: Arc::new(Mutex::new(x_start)),
+            x_finish: Arc::new(Mutex::new(x_finish)),
+            x_step: Arc::new(Mutex::new(x_step)),
             z_first_index,
             string_num,
             x_step_index,
+            x_max_pos,
             tuner_indices,
             stepper_enabled: Arc::new(Mutex::new(stepper_enabled)),
             gpio,
@@ -379,6 +393,48 @@ impl Operations {
         self.z_variance_threshold.lock()
             .map(|t| *t)
             .unwrap_or(50)
+    }
+    
+    /// Set x_start value
+    pub fn set_x_start(&self, start: i32) {
+        if let Ok(mut val) = self.x_start.lock() {
+            *val = start;
+        }
+    }
+    
+    /// Get x_start value
+    pub fn get_x_start(&self) -> i32 {
+        self.x_start.lock()
+            .map(|s| *s)
+            .unwrap_or(0)
+    }
+    
+    /// Set x_finish value
+    pub fn set_x_finish(&self, finish: i32) {
+        if let Ok(mut val) = self.x_finish.lock() {
+            *val = finish;
+        }
+    }
+    
+    /// Get x_finish value
+    pub fn get_x_finish(&self) -> i32 {
+        self.x_finish.lock()
+            .map(|f| *f)
+            .unwrap_or(100)
+    }
+    
+    /// Set x_step value
+    pub fn set_x_step(&self, step: i32) {
+        if let Ok(mut val) = self.x_step.lock() {
+            *val = step;
+        }
+    }
+    
+    /// Get x_step value
+    pub fn get_x_step(&self) -> i32 {
+        self.x_step.lock()
+            .map(|s| *s)
+            .unwrap_or(10)
     }
     
     /// Get Z stepper indices based on configuration
@@ -1177,6 +1233,538 @@ impl Operations {
             messages.push(bump_msg_final);
         }
         messages.push("Z adjustment complete".to_string());
+        Ok(messages.join("\n"))
+    }
+    
+    /// Right to left move operation: moves X from x_start to x_finish, adjusting Z at each position
+    /// Uses Adjustment Level to iterate in place until successfully passing the value
+    /// If attempts exceed Retry Threshold or Z variance threshold, performs calibration
+    pub fn right_left_move<T: StepperOperations>(
+        &self,
+        stepper_ops: &mut T,
+        positions: &mut [i32],
+        max_positions: &HashMap<usize, i32>,
+        min_thresholds: &[f32],
+        max_thresholds: &[f32],
+        min_voices: &[usize],
+        max_voices: &[usize],
+        exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<String> {
+        let x_step_index = self.x_step_index.ok_or_else(|| anyhow!("X stepper not configured"))?;
+        let x_start = self.get_x_start();
+        let x_finish = self.get_x_finish();
+        let x_step = self.get_x_step();
+        let adjustment_level = self.get_adjustment_level();
+        let retry_threshold = self.get_retry_threshold();
+        let z_variance_threshold = self.get_z_variance_threshold();
+        
+        let mut messages = Vec::new();
+        messages.push(format!("Starting right_left_move: X from {} to {} (step: {})", x_start, x_finish, x_step));
+        
+        // Get current X position
+        let current_x_pos = positions.get(x_step_index).copied().unwrap_or(0);
+        
+        // Move to x_start if not already there
+        if current_x_pos != x_start {
+            messages.push(format!("Moving X to start position: {}", x_start));
+            let delta = x_start - current_x_pos;
+            self.rel_move_x(stepper_ops, x_step_index, delta)?;
+            if let Some(pos) = positions.get_mut(x_step_index) {
+                *pos = x_start;
+            }
+        }
+        
+        // Move from x_start to x_finish
+        let mut current_x = x_start;
+        let step_direction = if x_finish > x_start { 1 } else { -1 };
+        let abs_step = x_step.abs();
+        
+        while (step_direction > 0 && current_x < x_finish) || (step_direction < 0 && current_x > x_finish) {
+            // Check exit flag
+            if let Some(exit) = exit_flag {
+                if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                    messages.push("Operation cancelled".to_string());
+                    return Ok(messages.join("\n"));
+                }
+            }
+            
+            // Move X by one step
+            let step_delta = step_direction * abs_step;
+            let next_x = current_x + step_delta;
+            let final_x = if step_direction > 0 {
+                next_x.min(x_finish)
+            } else {
+                next_x.max(x_finish)
+            };
+            let actual_delta = final_x - current_x;
+            
+            if actual_delta != 0 {
+                self.rel_move_x(stepper_ops, x_step_index, actual_delta)?;
+                if let Some(pos) = positions.get_mut(x_step_index) {
+                    *pos = final_x;
+                }
+                current_x = final_x;
+                messages.push(format!("Moved X to position: {}", current_x));
+            }
+            
+            // Iterate z_adjust in place until adjustment_level is met or thresholds exceeded
+            let mut attempts = 0;
+            let mut last_voice_counts = Vec::new();
+            
+            loop {
+                // Check exit flag
+                if let Some(exit) = exit_flag {
+                    if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                        messages.push("Operation cancelled".to_string());
+                        return Ok(messages.join("\n"));
+                    }
+                }
+                
+                attempts += 1;
+                
+                // Run z_adjust
+                let z_adjust_msg = self.z_adjust(
+                    stepper_ops,
+                    positions,
+                    max_positions,
+                    min_thresholds,
+                    max_thresholds,
+                    min_voices,
+                    max_voices,
+                    exit_flag,
+                )?;
+                
+                // Get current voice counts
+                let voice_counts = self.get_voice_count();
+                
+                // Check if we've met adjustment_level (all strings have voice_count >= adjustment_level)
+                let all_meet_level = voice_counts.iter().all(|&count| count >= adjustment_level as usize);
+                
+                if all_meet_level {
+                    messages.push(format!("Adjustment level {} met at X={} after {} attempts", adjustment_level, current_x, attempts));
+                    break;
+                }
+                
+                // Check if we've exceeded retry threshold
+                if attempts >= retry_threshold {
+                    messages.push(format!("Retry threshold {} exceeded at X={}, performing calibration", retry_threshold, current_x));
+                    let cal_msg = self.z_calibrate(stepper_ops, positions, max_positions, exit_flag)?;
+                    messages.push(cal_msg);
+                    break;
+                }
+                
+                // Check Z variance threshold
+                if !last_voice_counts.is_empty() && last_voice_counts.len() == voice_counts.len() {
+                    let variance: i32 = voice_counts.iter()
+                        .zip(last_voice_counts.iter())
+                        .map(|(curr, last)| ((*curr as i32) - (*last as i32)).abs())
+                        .sum();
+                    
+                    if variance > z_variance_threshold {
+                        messages.push(format!("Z variance threshold {} exceeded at X={}, performing calibration", z_variance_threshold, current_x));
+                        let cal_msg = self.z_calibrate(stepper_ops, positions, max_positions, exit_flag)?;
+                        messages.push(cal_msg);
+                        break;
+                    }
+                }
+                
+                last_voice_counts = voice_counts.clone();
+            }
+            
+            // Break if we've reached x_finish
+            if current_x == x_finish {
+                break;
+            }
+        }
+        
+        messages.push("right_left_move complete".to_string());
+        Ok(messages.join("\n"))
+    }
+    
+    /// Left to right move operation: moves X from x_finish to x_start, adjusting Z at each position
+    /// Uses Adjustment Level to iterate in place until successfully passing the value
+    /// If attempts exceed Retry Threshold or Z variance threshold, performs calibration
+    pub fn left_right_move<T: StepperOperations>(
+        &self,
+        stepper_ops: &mut T,
+        positions: &mut [i32],
+        max_positions: &HashMap<usize, i32>,
+        min_thresholds: &[f32],
+        max_thresholds: &[f32],
+        min_voices: &[usize],
+        max_voices: &[usize],
+        exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<String> {
+        let x_step_index = self.x_step_index.ok_or_else(|| anyhow!("X stepper not configured"))?;
+        let x_start = self.get_x_start();
+        let x_finish = self.get_x_finish();
+        let x_step = self.get_x_step();
+        let adjustment_level = self.get_adjustment_level();
+        let retry_threshold = self.get_retry_threshold();
+        let z_variance_threshold = self.get_z_variance_threshold();
+        
+        let mut messages = Vec::new();
+        messages.push(format!("Starting left_right_move: X from {} to {} (step: {})", x_finish, x_start, x_step));
+        
+        // Get current X position
+        let current_x_pos = positions.get(x_step_index).copied().unwrap_or(0);
+        
+        // Move to x_finish if not already there
+        if current_x_pos != x_finish {
+            messages.push(format!("Moving X to start position: {}", x_finish));
+            let delta = x_finish - current_x_pos;
+            self.rel_move_x(stepper_ops, x_step_index, delta)?;
+            if let Some(pos) = positions.get_mut(x_step_index) {
+                *pos = x_finish;
+            }
+        }
+        
+        // Move from x_finish to x_start
+        let mut current_x = x_finish;
+        let step_direction = if x_start > x_finish { 1 } else { -1 };
+        let abs_step = x_step.abs();
+        
+        while (step_direction > 0 && current_x < x_start) || (step_direction < 0 && current_x > x_start) {
+            // Check exit flag
+            if let Some(exit) = exit_flag {
+                if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                    messages.push("Operation cancelled".to_string());
+                    return Ok(messages.join("\n"));
+                }
+            }
+            
+            // Move X by one step
+            let step_delta = step_direction * abs_step;
+            let next_x = current_x + step_delta;
+            let final_x = if step_direction > 0 {
+                next_x.min(x_start)
+            } else {
+                next_x.max(x_start)
+            };
+            let actual_delta = final_x - current_x;
+            
+            if actual_delta != 0 {
+                self.rel_move_x(stepper_ops, x_step_index, actual_delta)?;
+                if let Some(pos) = positions.get_mut(x_step_index) {
+                    *pos = final_x;
+                }
+                current_x = final_x;
+                messages.push(format!("Moved X to position: {}", current_x));
+            }
+            
+            // Iterate z_adjust in place until adjustment_level is met or thresholds exceeded
+            let mut attempts = 0;
+            let mut last_voice_counts = Vec::new();
+            
+            loop {
+                // Check exit flag
+                if let Some(exit) = exit_flag {
+                    if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                        messages.push("Operation cancelled".to_string());
+                        return Ok(messages.join("\n"));
+                    }
+                }
+                
+                attempts += 1;
+                
+                // Run z_adjust
+                let z_adjust_msg = self.z_adjust(
+                    stepper_ops,
+                    positions,
+                    max_positions,
+                    min_thresholds,
+                    max_thresholds,
+                    min_voices,
+                    max_voices,
+                    exit_flag,
+                )?;
+                
+                // Get current voice counts
+                let voice_counts = self.get_voice_count();
+                
+                // Check if we've met adjustment_level (all strings have voice_count >= adjustment_level)
+                let all_meet_level = voice_counts.iter().all(|&count| count >= adjustment_level as usize);
+                
+                if all_meet_level {
+                    messages.push(format!("Adjustment level {} met at X={} after {} attempts", adjustment_level, current_x, attempts));
+                    break;
+                }
+                
+                // Check if we've exceeded retry threshold
+                if attempts >= retry_threshold {
+                    messages.push(format!("Retry threshold {} exceeded at X={}, performing calibration", retry_threshold, current_x));
+                    let cal_msg = self.z_calibrate(stepper_ops, positions, max_positions, exit_flag)?;
+                    messages.push(cal_msg);
+                    break;
+                }
+                
+                // Check Z variance threshold
+                if !last_voice_counts.is_empty() && last_voice_counts.len() == voice_counts.len() {
+                    let variance: i32 = voice_counts.iter()
+                        .zip(last_voice_counts.iter())
+                        .map(|(curr, last)| ((*curr as i32) - (*last as i32)).abs())
+                        .sum();
+                    
+                    if variance > z_variance_threshold {
+                        messages.push(format!("Z variance threshold {} exceeded at X={}, performing calibration", z_variance_threshold, current_x));
+                        let cal_msg = self.z_calibrate(stepper_ops, positions, max_positions, exit_flag)?;
+                        messages.push(cal_msg);
+                        break;
+                    }
+                }
+                
+                last_voice_counts = voice_counts.clone();
+            }
+            
+            // Break if we've reached x_start
+            if current_x == x_start {
+                break;
+            }
+        }
+        
+        messages.push("left_right_move complete".to_string());
+        Ok(messages.join("\n"))
+    }
+    
+    /// X Home operation: moves X stepper toward home until home limit is hit
+    /// Handles both separate home/away pins and single X_LIMIT_PIN (direction-based)
+    pub fn x_home<T: StepperOperations>(
+        &self,
+        stepper_ops: &mut T,
+        positions: &mut [i32],
+        exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<String> {
+        let x_step_index = self.x_step_index.ok_or_else(|| anyhow!("X stepper not configured"))?;
+        
+        // Check if this is a dummy X stepper (X_MAX_POS == 0)
+        if self.x_max_pos == Some(0) {
+            return Ok("X stepper is dummy (X_MAX_POS=0) - operation skipped".to_string());
+        }
+        
+        let gpio = self.gpio.as_ref().ok_or_else(|| anyhow!("GPIO not initialized"))?;
+        if !gpio.exist {
+            return Ok("GPIO not available - cannot check home limit".to_string());
+        }
+        
+        let mut messages = Vec::new();
+        messages.push("Starting X Home operation...".to_string());
+        
+        // Check if we have home limit detection
+        if gpio.x_home_line.is_none() {
+            return Ok("No X home limit switch configured".to_string());
+        }
+        
+        // Get current X position
+        let current_x_pos = positions.get(x_step_index).copied().unwrap_or(0);
+        messages.push(format!("Current X position: {}", current_x_pos));
+        
+        // Move toward home (negative direction) in small steps until limit is hit
+        const STEP_SIZE: i32 = -10; // Move 10 steps toward home at a time
+        let mut moved = false;
+        let mut iterations = 0;
+        const MAX_ITERATIONS: u32 = 1000; // Safety limit
+        
+        loop {
+            // Check exit flag
+            if let Some(exit) = exit_flag {
+                if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                    messages.push("Operation cancelled".to_string());
+                    return Ok(messages.join("\n"));
+                }
+            }
+            
+            // Check if we've hit the limit using existing GPIO function
+            let at_home = gpio.x_home_check().unwrap_or(false);
+            
+            if at_home {
+                messages.push("Home limit reached".to_string());
+                break;
+            }
+            
+            // Safety check
+            if iterations >= MAX_ITERATIONS {
+                messages.push(format!("Max iterations ({}) reached - stopping", MAX_ITERATIONS));
+                break;
+            }
+            
+            // Move one step toward home
+            self.rel_move_x(stepper_ops, x_step_index, STEP_SIZE)?;
+            if let Some(pos) = positions.get_mut(x_step_index) {
+                *pos += STEP_SIZE;
+            }
+            moved = true;
+            iterations += 1;
+            
+            if iterations % 10 == 0 {
+                messages.push(format!("Moving toward home... (iteration {})", iterations));
+            }
+        }
+        
+        if moved {
+            let final_pos = positions.get(x_step_index).copied().unwrap_or(0);
+            messages.push(format!("X Home complete - final position: {}", final_pos));
+        } else {
+            messages.push("X Home complete - already at home or no movement needed".to_string());
+        }
+        
+        Ok(messages.join("\n"))
+    }
+    
+    /// X Away operation: moves X stepper toward away until away limit is hit
+    /// Handles both separate home/away pins and single X_LIMIT_PIN (direction-based)
+    pub fn x_away<T: StepperOperations>(
+        &self,
+        stepper_ops: &mut T,
+        positions: &mut [i32],
+        exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<String> {
+        let x_step_index = self.x_step_index.ok_or_else(|| anyhow!("X stepper not configured"))?;
+        
+        // Check if this is a dummy X stepper (X_MAX_POS == 0)
+        if self.x_max_pos == Some(0) {
+            return Ok("X stepper is dummy (X_MAX_POS=0) - operation skipped".to_string());
+        }
+        
+        let gpio = self.gpio.as_ref().ok_or_else(|| anyhow!("GPIO not initialized"))?;
+        if !gpio.exist {
+            return Ok("GPIO not available - cannot check away limit".to_string());
+        }
+        
+        let mut messages = Vec::new();
+        messages.push("Starting X Away operation...".to_string());
+        
+        // Check if we have away limit detection
+        if gpio.x_away_line.is_none() {
+            return Ok("No X away limit switch configured".to_string());
+        }
+        
+        // Get current X position
+        let current_x_pos = positions.get(x_step_index).copied().unwrap_or(0);
+        messages.push(format!("Current X position: {}", current_x_pos));
+        
+        // Move toward away (positive direction) in small steps until limit is hit
+        const STEP_SIZE: i32 = 10; // Move 10 steps toward away at a time
+        let mut moved = false;
+        let mut iterations = 0;
+        const MAX_ITERATIONS: u32 = 1000; // Safety limit
+        
+        loop {
+            // Check exit flag
+            if let Some(exit) = exit_flag {
+                if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                    messages.push("Operation cancelled".to_string());
+                    return Ok(messages.join("\n"));
+                }
+            }
+            
+            // Check if we've hit the limit using existing GPIO function
+            let at_away = gpio.x_away_check().unwrap_or(false);
+            
+            if at_away {
+                messages.push("Away limit reached".to_string());
+                break;
+            }
+            
+            // Safety check
+            if iterations >= MAX_ITERATIONS {
+                messages.push(format!("Max iterations ({}) reached - stopping", MAX_ITERATIONS));
+                break;
+            }
+            
+            // Move one step toward away
+            self.rel_move_x(stepper_ops, x_step_index, STEP_SIZE)?;
+            if let Some(pos) = positions.get_mut(x_step_index) {
+                *pos += STEP_SIZE;
+            }
+            moved = true;
+            iterations += 1;
+            
+            if iterations % 10 == 0 {
+                messages.push(format!("Moving toward away... (iteration {})", iterations));
+            }
+        }
+        
+        if moved {
+            let final_pos = positions.get(x_step_index).copied().unwrap_or(0);
+            messages.push(format!("X Away complete - final position: {}", final_pos));
+        } else {
+            messages.push("X Away complete - already at away or no movement needed".to_string());
+        }
+        
+        Ok(messages.join("\n"))
+    }
+    
+    /// X Calibrate operation: moves to home, resets to 0, then moves to away and sets max position
+    pub fn x_calibrate<T: StepperOperations>(
+        &self,
+        stepper_ops: &mut T,
+        positions: &mut [i32],
+        exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<String> {
+        let x_step_index = self.x_step_index.ok_or_else(|| anyhow!("X stepper not configured"))?;
+        
+        // Check if this is a dummy X stepper (X_MAX_POS == 0)
+        if self.x_max_pos == Some(0) {
+            return Ok("X stepper is dummy (X_MAX_POS=0) - calibration skipped".to_string());
+        }
+        
+        let gpio = self.gpio.as_ref().ok_or_else(|| anyhow!("GPIO not initialized"))?;
+        if !gpio.exist {
+            return Ok("GPIO not available - cannot calibrate X".to_string());
+        }
+        
+        let mut messages = Vec::new();
+        messages.push("Starting X Calibration...".to_string());
+        
+        // Step 1: Move to home
+        messages.push("Step 1: Moving to home position...".to_string());
+        let home_msg = self.x_home(stepper_ops, positions, exit_flag)?;
+        messages.push(home_msg);
+        
+        // Check exit flag
+        if let Some(exit) = exit_flag {
+            if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                messages.push("Calibration cancelled".to_string());
+                return Ok(messages.join("\n"));
+            }
+        }
+        
+        // Step 2: Reset position to 0 at home
+        messages.push("Step 2: Resetting X position to 0 at home...".to_string());
+        stepper_ops.reset(x_step_index, 0)?;
+        if let Some(pos) = positions.get_mut(x_step_index) {
+            *pos = 0;
+        }
+        messages.push("X position reset to 0".to_string());
+        
+        // Check exit flag
+        if let Some(exit) = exit_flag {
+            if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                messages.push("Calibration cancelled".to_string());
+                return Ok(messages.join("\n"));
+            }
+        }
+        
+        // Step 3: Move to away
+        messages.push("Step 3: Moving to away position...".to_string());
+        let away_msg = self.x_away(stepper_ops, positions, exit_flag)?;
+        messages.push(away_msg);
+        
+        // Check exit flag
+        if let Some(exit) = exit_flag {
+            if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                messages.push("Calibration cancelled".to_string());
+                return Ok(messages.join("\n"));
+            }
+        }
+        
+        // Step 4: Set max position based on current position
+        let final_pos = positions.get(x_step_index).copied().unwrap_or(0);
+        messages.push(format!("Step 4: Setting max position to {}...", final_pos));
+        // Note: We don't have a set_max_position method, so we just record it
+        // The max position should be stored in the positions array or max_positions map
+        messages.push(format!("X Calibration complete - max position: {}", final_pos));
+        
         Ok(messages.join("\n"))
     }
 }

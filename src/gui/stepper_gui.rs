@@ -1405,6 +1405,9 @@ fn main() {
                 retry_threshold: Some(50),
                 delta_threshold: Some(50),
                 z_variance_threshold: Some(50),
+                x_start: Some(0),
+                x_finish: Some(100),
+                x_step: Some(10),
             }
         }
     };
