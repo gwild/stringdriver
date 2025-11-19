@@ -926,24 +926,16 @@ impl eframe::App for OperationsGUI {
                 }
 
                 ui.add_space(16.0);
-                // EXIT button with red background
-                let exit_button = egui::Button::new(egui::RichText::new("EXIT").strong())
-                    .min_size(egui::vec2(70.0, 28.0));
-                let style = ui.style_mut();
-                let saved_inactive = style.visuals.widgets.inactive.bg_fill;
-                let saved_hovered = style.visuals.widgets.hovered.bg_fill;
-                let saved_active = style.visuals.widgets.active.bg_fill;
-                style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(220, 32, 32);
-                style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(240, 50, 50);
-                style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(200, 20, 20);
-                if ui.add(exit_button).clicked() {
+                // EXIT button with red background - use Frame with fill
+                let exit_response = egui::Frame::default()
+                    .fill(egui::Color32::from_rgb(220, 32, 32))
+                    .inner_margin(egui::Margin::same(6.0))
+                    .show(ui, |ui| {
+                        ui.add(egui::Button::new(egui::RichText::new("EXIT").strong()))
+                    });
+                if exit_response.inner.clicked() {
                     self.kill_all();
                 }
-                // Restore saved button style
-                let style = ui.style_mut();
-                style.visuals.widgets.inactive.bg_fill = saved_inactive;
-                style.visuals.widgets.hovered.bg_fill = saved_hovered;
-                style.visuals.widgets.active.bg_fill = saved_active;
             });
             
             ui.separator();
@@ -1474,45 +1466,30 @@ impl eframe::App for OperationsGUI {
                     });
                 
                 ui.horizontal(|ui| {
-                    // Execute button with green background
-                    let execute_button = egui::Button::new("Execute").min_size(egui::vec2(70.0, 28.0));
-                    let style = ui.style_mut();
-                    let saved_inactive = style.visuals.widgets.inactive.bg_fill;
-                    let saved_hovered = style.visuals.widgets.hovered.bg_fill;
-                    let saved_active = style.visuals.widgets.active.bg_fill;
-                    style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(0, 150, 0);
-                    style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0, 180, 0);
-                    style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0, 120, 0);
-                    if ui.add(execute_button).clicked() {
+                    // Execute button with green background - use Frame with fill
+                    let execute_response = egui::Frame::default()
+                        .fill(egui::Color32::from_rgb(0, 150, 0))
+                        .inner_margin(egui::Margin::same(6.0))
+                        .show(ui, |ui| {
+                            ui.add(egui::Button::new("Execute"))
+                        });
+                    if execute_response.inner.clicked() {
                         self.repeat_pending = None;
                         self.execute_operation();
                     }
-                    // Restore saved button style
-                    let style = ui.style_mut();
-                    style.visuals.widgets.inactive.bg_fill = saved_inactive;
-                    style.visuals.widgets.hovered.bg_fill = saved_hovered;
-                    style.visuals.widgets.active.bg_fill = saved_active;
                     
-                    // BREAK button with orange background
+                    // BREAK button with orange background - use Frame with fill
                     let operation_running = self.operation_running.load(std::sync::atomic::Ordering::Relaxed);
-                    let break_button = egui::Button::new(egui::RichText::new("BREAK").strong())
-                        .min_size(egui::vec2(70.0, 28.0));
-                    let style = ui.style_mut();
-                    let saved_inactive = style.visuals.widgets.inactive.bg_fill;
-                    let saved_hovered = style.visuals.widgets.hovered.bg_fill;
-                    let saved_active = style.visuals.widgets.active.bg_fill;
-                    style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(255, 165, 0);
-                    style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(255, 185, 20);
-                    style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(235, 145, 0);
-                    if ui.add_enabled(operation_running, break_button).on_hover_text("Stop the currently running operation (does not close GUI)").clicked() {
+                    let break_response = egui::Frame::default()
+                        .fill(egui::Color32::from_rgb(255, 165, 0))
+                        .inner_margin(egui::Margin::same(6.0))
+                        .show(ui, |ui| {
+                            ui.add_enabled(operation_running, egui::Button::new(egui::RichText::new("BREAK").strong()))
+                        });
+                    if break_response.inner.clicked() {
                         self.exit_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                         self.append_message("Break requested - operation will stop at next check point");
                     }
-                    // Restore saved button style
-                    let style = ui.style_mut();
-                    style.visuals.widgets.inactive.bg_fill = saved_inactive;
-                    style.visuals.widgets.hovered.bg_fill = saved_hovered;
-                    style.visuals.widgets.active.bg_fill = saved_active;
                     
                     let mut repeat_flag = self.repeat_enabled;
                     if ui.checkbox(&mut repeat_flag, "Repeat").changed() {
