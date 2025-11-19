@@ -978,11 +978,14 @@ impl eframe::App for StepperGUI {
                 // Stepper 0 is x-axis carriage (if present)
                 
                 // Show X stepper separately if it exists and is valid
+                // Always show slider regardless of position value (clamp display to 0 minimum)
                 if let Some(x_idx) = self.x_step_index {
-                    if x_idx < self.positions.len() && self.positions[x_idx] >= 0 {
+                    if x_idx < self.positions.len() {
                         ui.horizontal(|ui| {
                             ui.label(&format!("X-axis (Stepper {}):", x_idx));
                             let mut pos = self.positions[x_idx];
+                            // Clamp position for display (min 0) but keep actual value for editing
+                            let display_pos = pos.max(0);
                             // Read-only horizontal slider for visualization
                             // Use X_MAX_POS from config
                             if let Some(max_range) = self.x_max_pos {
@@ -1035,8 +1038,8 @@ impl eframe::App for StepperGUI {
                                 );
                                 painter.rect_filled(track_rect, 2.0, egui::Color32::from_gray(60));
                                 
-                                // Calculate normalized position (0.0 to 1.0)
-                                let normalized_pos = (pos as f32 + 100.0) / (max_range as f32 + 100.0);
+                                // Calculate normalized position (0.0 to 1.0) using clamped display position
+                                let normalized_pos = (display_pos as f32 + 100.0) / (max_range as f32 + 100.0);
                                 let normalized_pos = normalized_pos.clamp(0.0, 1.0);
                                 
                                 // Draw filled portion (position indicator)

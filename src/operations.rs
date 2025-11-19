@@ -908,6 +908,29 @@ impl Operations {
             messages.push(bump_msg_initial);
         }
         
+        // Set X stepper position to max before Z calibration (like Surfer - set, not move)
+        if let Some(x_idx) = self.x_step_index {
+            if let Some(x_max) = self.x_max_pos {
+                if x_max > 0 {
+                    // Check exit flag
+                    if let Some(exit) = exit_flag {
+                        if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                            messages.push("Operation cancelled".to_string());
+                            return Ok(messages.join("\n"));
+                        }
+                    }
+                    
+                    messages.push(format!("Setting X stepper position to {} (max) before Z calibration...", x_max));
+                    // Set position to max without moving (like Surfer's set_stepper)
+                    stepper_ops.reset(x_idx, x_max)?;
+                    if let Some(pos) = positions.get_mut(x_idx) {
+                        *pos = x_max;
+                    }
+                    messages.push(format!("X stepper position set to {}", x_max));
+                }
+            }
+        }
+        
         let z_indices = self.get_z_stepper_indices();
         let enabled_states = self.get_all_stepper_enabled();
         let z_down_step = self.get_z_down_step();
@@ -1591,6 +1614,12 @@ impl Operations {
             
             if at_home {
                 messages.push("Home limit reached".to_string());
+                // Reset position to 0 at home (home is the reference point)
+                stepper_ops.reset(x_step_index, 0)?;
+                if let Some(pos) = positions.get_mut(x_step_index) {
+                    *pos = 0;
+                }
+                messages.push("X position reset to 0 at home".to_string());
                 break;
             }
             
