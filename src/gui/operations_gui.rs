@@ -528,6 +528,9 @@ impl OperationsGUI {
                     }
                     self.append_message(&result.message);
                     self.operation_running.store(false, std::sync::atomic::Ordering::Relaxed);
+                    // Reset exit flag when operation completes (unless it's a kill_all shutdown)
+                    // This allows break button to work without closing the window
+                    self.exit_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                     should_clear = true;
                     if self.repeat_enabled && self.selected_operation == result.operation {
                         schedule_repeat_op = Some(result.operation.clone());
@@ -537,6 +540,8 @@ impl OperationsGUI {
                 Err(TryRecvError::Disconnected) => {
                     self.append_message("Operation worker disconnected unexpectedly");
                     self.operation_running.store(false, std::sync::atomic::Ordering::Relaxed);
+                    // Reset exit flag when operation completes
+                    self.exit_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                     should_clear = true;
                 }
             }
@@ -608,6 +613,9 @@ impl OperationsGUI {
     }
 
     fn start_operation(&mut self, operation: String) {
+        // Reset exit flag when starting a new operation
+        self.exit_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        
         let arduino_ops = match self.arduino_ops.as_ref() {
             Some(ops) => Arc::clone(ops),
             None => {
@@ -1461,6 +1469,17 @@ impl eframe::App for OperationsGUI {
                     if ui.button("Execute").clicked() {
                         self.repeat_pending = None;
                         self.execute_operation();
+                    }
+                    let operation_running = self.operation_running.load(std::sync::atomic::Ordering::Relaxed);
+                    let break_button = egui::Button::new(
+                        egui::RichText::new("BREAK")
+                            .color(egui::Color32::from_rgb(255, 165, 0)) // Orange color to distinguish from red EXIT
+                            .strong(),
+                    )
+                    .min_size(egui::vec2(70.0, 28.0));
+                    if ui.add_enabled(operation_running, break_button).on_hover_text("Stop the currently running operation (does not close GUI)").clicked() {
+                        self.exit_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                        self.append_message("Break requested - operation will stop at next check point");
                     }
                     let mut repeat_flag = self.repeat_enabled;
                     if ui.checkbox(&mut repeat_flag, "Repeat").changed() {

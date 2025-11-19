@@ -1324,27 +1324,10 @@ impl Operations {
                 }
             }
             
-            // Move X by one step
-            let step_delta = step_direction * abs_step;
-            let next_x = current_x + step_delta;
-            let final_x = if step_direction > 0 {
-                next_x.min(x_finish)
-            } else {
-                next_x.max(x_finish)
-            };
-            let actual_delta = final_x - current_x;
-            
-            if actual_delta != 0 {
-                self.rel_move_x(stepper_ops, x_step_index, actual_delta)?;
-                if let Some(pos) = positions.get_mut(x_step_index) {
-                    *pos = final_x;
-                }
-                current_x = final_x;
-                messages.push(format!("Moved X to position: {}", current_x));
-            }
-            
-            // Iterate z_adjust in place until adjustment_level is met or thresholds exceeded
-            let mut attempts = 0;
+            // At current X position, iterate until we get Adjustment Level consecutive successful passes
+            // Each pass = z_adjust + bump_check
+            let mut pass_count = 0; // Consecutive successful passes
+            let mut attempts = 0; // Total attempts (for retry threshold)
             let mut last_voice_counts = Vec::new();
             
             loop {
@@ -1370,6 +1353,9 @@ impl Operations {
                     exit_flag,
                 )?;
                 
+                // Run bump_check
+                let bump_msg = self.bump_check(None, positions, max_positions, stepper_ops, exit_flag)?;
+                
                 // Get current voice counts
                 let voice_counts = self.get_voice_count();
                 
@@ -1377,8 +1363,44 @@ impl Operations {
                 let all_meet_level = voice_counts.iter().all(|&count| count >= adjustment_level as usize);
                 
                 if all_meet_level {
-                    messages.push(format!("Adjustment level {} met at X={} after {} attempts", adjustment_level, current_x, attempts));
-                    break;
+                    // Successful pass - increment pass counter
+                    pass_count += 1;
+                    messages.push(format!("Pass {} of {} successful at X={} (attempt {})", pass_count, adjustment_level, current_x, attempts));
+                    
+                    // If we've reached Adjustment Level consecutive passes, move X and break
+                    if pass_count >= adjustment_level {
+                        messages.push(format!("Adjustment level {} met at X={} after {} attempts, moving X", adjustment_level, current_x, attempts));
+                        
+                        // Move X by one step
+                        let step_delta = step_direction * abs_step;
+                        let next_x = current_x + step_delta;
+                        let final_x = if step_direction > 0 {
+                            next_x.min(x_finish)
+                        } else {
+                            next_x.max(x_finish)
+                        };
+                        let actual_delta = final_x - current_x;
+                        
+                        if actual_delta != 0 {
+                            self.rel_move_x(stepper_ops, x_step_index, actual_delta)?;
+                            if let Some(pos) = positions.get_mut(x_step_index) {
+                                *pos = final_x;
+                            }
+                            current_x = final_x;
+                            messages.push(format!("Moved X to position: {}", current_x));
+                        }
+                        
+                        // Reset pass counter for next X position
+                        pass_count = 0;
+                        attempts = 0;
+                        break; // Break inner loop to move to next X position
+                    }
+                } else {
+                    // Adjustment failed - reset pass counter
+                    if pass_count > 0 {
+                        messages.push(format!("Adjustment failed at X={}, resetting pass count from {} to 0", current_x, pass_count));
+                    }
+                    pass_count = 0;
                 }
                 
                 // Check if we've exceeded retry threshold
@@ -1386,7 +1408,10 @@ impl Operations {
                     messages.push(format!("Retry threshold {} exceeded at X={}, performing calibration", retry_threshold, current_x));
                     let cal_msg = self.z_calibrate(stepper_ops, positions, max_positions, exit_flag)?;
                     messages.push(cal_msg);
-                    break;
+                    // Reset counters after calibration
+                    pass_count = 0;
+                    attempts = 0;
+                    // Continue trying at current X position
                 }
                 
                 // Check Z variance threshold
@@ -1400,7 +1425,10 @@ impl Operations {
                         messages.push(format!("Z variance threshold {} exceeded at X={}, performing calibration", z_variance_threshold, current_x));
                         let cal_msg = self.z_calibrate(stepper_ops, positions, max_positions, exit_flag)?;
                         messages.push(cal_msg);
-                        break;
+                        // Reset counters after calibration
+                        pass_count = 0;
+                        attempts = 0;
+                        // Continue trying at current X position
                     }
                 }
                 
@@ -1469,27 +1497,10 @@ impl Operations {
                 }
             }
             
-            // Move X by one step
-            let step_delta = step_direction * abs_step;
-            let next_x = current_x + step_delta;
-            let final_x = if step_direction > 0 {
-                next_x.min(x_start)
-            } else {
-                next_x.max(x_start)
-            };
-            let actual_delta = final_x - current_x;
-            
-            if actual_delta != 0 {
-                self.rel_move_x(stepper_ops, x_step_index, actual_delta)?;
-                if let Some(pos) = positions.get_mut(x_step_index) {
-                    *pos = final_x;
-                }
-                current_x = final_x;
-                messages.push(format!("Moved X to position: {}", current_x));
-            }
-            
-            // Iterate z_adjust in place until adjustment_level is met or thresholds exceeded
-            let mut attempts = 0;
+            // At current X position, iterate until we get Adjustment Level consecutive successful passes
+            // Each pass = z_adjust + bump_check
+            let mut pass_count = 0; // Consecutive successful passes
+            let mut attempts = 0; // Total attempts (for retry threshold)
             let mut last_voice_counts = Vec::new();
             
             loop {
@@ -1515,6 +1526,9 @@ impl Operations {
                     exit_flag,
                 )?;
                 
+                // Run bump_check
+                let bump_msg = self.bump_check(None, positions, max_positions, stepper_ops, exit_flag)?;
+                
                 // Get current voice counts
                 let voice_counts = self.get_voice_count();
                 
@@ -1522,8 +1536,44 @@ impl Operations {
                 let all_meet_level = voice_counts.iter().all(|&count| count >= adjustment_level as usize);
                 
                 if all_meet_level {
-                    messages.push(format!("Adjustment level {} met at X={} after {} attempts", adjustment_level, current_x, attempts));
-                    break;
+                    // Successful pass - increment pass counter
+                    pass_count += 1;
+                    messages.push(format!("Pass {} of {} successful at X={} (attempt {})", pass_count, adjustment_level, current_x, attempts));
+                    
+                    // If we've reached Adjustment Level consecutive passes, move X and break
+                    if pass_count >= adjustment_level {
+                        messages.push(format!("Adjustment level {} met at X={} after {} attempts, moving X", adjustment_level, current_x, attempts));
+                        
+                        // Move X by one step
+                        let step_delta = step_direction * abs_step;
+                        let next_x = current_x + step_delta;
+                        let final_x = if step_direction > 0 {
+                            next_x.min(x_start)
+                        } else {
+                            next_x.max(x_start)
+                        };
+                        let actual_delta = final_x - current_x;
+                        
+                        if actual_delta != 0 {
+                            self.rel_move_x(stepper_ops, x_step_index, actual_delta)?;
+                            if let Some(pos) = positions.get_mut(x_step_index) {
+                                *pos = final_x;
+                            }
+                            current_x = final_x;
+                            messages.push(format!("Moved X to position: {}", current_x));
+                        }
+                        
+                        // Reset pass counter for next X position
+                        pass_count = 0;
+                        attempts = 0;
+                        break; // Break inner loop to move to next X position
+                    }
+                } else {
+                    // Adjustment failed - reset pass counter
+                    if pass_count > 0 {
+                        messages.push(format!("Adjustment failed at X={}, resetting pass count from {} to 0", current_x, pass_count));
+                    }
+                    pass_count = 0;
                 }
                 
                 // Check if we've exceeded retry threshold
@@ -1531,7 +1581,10 @@ impl Operations {
                     messages.push(format!("Retry threshold {} exceeded at X={}, performing calibration", retry_threshold, current_x));
                     let cal_msg = self.z_calibrate(stepper_ops, positions, max_positions, exit_flag)?;
                     messages.push(cal_msg);
-                    break;
+                    // Reset counters after calibration
+                    pass_count = 0;
+                    attempts = 0;
+                    // Continue trying at current X position
                 }
                 
                 // Check Z variance threshold
@@ -1545,7 +1598,10 @@ impl Operations {
                         messages.push(format!("Z variance threshold {} exceeded at X={}, performing calibration", z_variance_threshold, current_x));
                         let cal_msg = self.z_calibrate(stepper_ops, positions, max_positions, exit_flag)?;
                         messages.push(cal_msg);
-                        break;
+                        // Reset counters after calibration
+                        pass_count = 0;
+                        attempts = 0;
+                        // Continue trying at current X position
                     }
                 }
                 

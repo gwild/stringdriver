@@ -402,7 +402,6 @@ impl StepperGUI {
         let escaped_value = Self::escape_cmdmessenger_bytes(&value_bytes);
         buf.extend_from_slice(&escaped_value);
         buf.push(b';');
-        self.log(&format!("SEND BIN: {:?}", buf));
         if let Some(p) = self.port.as_mut() {
             let _ = p.write_all(&buf);
             let _ = p.flush();
@@ -448,7 +447,6 @@ impl StepperGUI {
     fn refresh_positions(&mut self) {
         if self.port.is_some() {
             let send = self.command_set.positions_cmd;
-            self.log(&format!("SEND: {:?}", send));
             let received = {
                 let port = self.port.as_mut().unwrap();
                 // Flush input buffer before command (mirror Python's flushInput)
@@ -501,8 +499,6 @@ impl StepperGUI {
             };
 
             if let Some(buffer) = received {
-                self.log(&format!("RECV: {:?}", buffer));
-
                 // Decode CmdMessenger: "1,<escaped-binary>;"
                 let mut data_bytes: Vec<u8> = Vec::new();
                 let mut seen_comma = false;
@@ -696,9 +692,7 @@ impl StepperGUI {
     fn refresh_tuner_positions(&mut self) {
         if let Some(ref mut tuner_port) = self.tuner_port {
             let send = self.command_set.positions_cmd;
-            let log_msg = format!("TUNER SEND: {:?}", send);
-            let _ = tuner_port; // Release borrow before logging
-            self.log(&log_msg);
+            let _ = tuner_port; // Release borrow
             
             let received = {
                 let port = self.tuner_port.as_mut().unwrap();
@@ -745,8 +739,6 @@ impl StepperGUI {
             };
 
             if let Some(buffer) = received {
-                let log_msg = format!("TUNER RECV: {:?}", buffer);
-                self.log(&log_msg);
                 let mut data_bytes: Vec<u8> = Vec::new();
                 let mut seen_comma = false;
                 let mut i = 0usize;
@@ -838,7 +830,6 @@ impl StepperGUI {
         let escaped_value = Self::escape_cmdmessenger_bytes(&value_bytes);
         buf.extend_from_slice(&escaped_value);
         buf.push(b';');
-        self.log(&format!("TUNER SEND BIN: {:?}", buf));
         if let Some(p) = self.tuner_port.as_mut() {
             let _ = p.write_all(&buf);
             let _ = p.flush();
