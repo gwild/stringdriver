@@ -8,7 +8,7 @@
 /// 
 /// Run with: cargo run --bin launcher --release
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::env;
 use std::path::Path;
 use std::io::Write;
@@ -105,6 +105,10 @@ fn main() {
     
     // Always build release binaries to ensure latest code is used
     println!("\nBuilding release binaries...");
+    println!("  This may take a while - compiling stepper_gui and operations_gui...");
+    println!("  (Cargo build output will appear below)\n");
+    std::io::stdout().flush().ok();
+    
     let mut build_args = vec!["build", "--release"];
     if gpio_enabled {
         build_args.push("--features");
@@ -114,25 +118,24 @@ fn main() {
     build_args.push("stepper_gui");
     build_args.push("--bin");
     build_args.push("operations_gui");
-    let build_output = Command::new("cargo")
+    
+    let build_status = Command::new("cargo")
         .args(&build_args)
         .current_dir(&project_root)
-        .output();
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status();
     
-    match build_output {
-        Ok(output) if output.status.success() => {
-            println!("✓ Release binaries built successfully");
+    match build_status {
+        Ok(status) if status.success() => {
+            println!("\n✓ Release binaries built successfully");
         }
-        Ok(output) => {
-            eprintln!("✗ Build failed with exit code: {:?}", output.status.code());
-            eprintln!("Build stderr:");
-            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
-            eprintln!("Build stdout:");
-            eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+        Ok(status) => {
+            eprintln!("\n✗ Build failed with exit code: {:?}", status.code());
             std::process::exit(1);
         }
         Err(e) => {
-            eprintln!("✗ Failed to run cargo build: {}", e);
+            eprintln!("\n✗ Failed to run cargo build: {}", e);
             std::process::exit(1);
         }
     }

@@ -984,8 +984,9 @@ impl eframe::App for StepperGUI {
                             // Read-only horizontal slider for visualization
                             // Use X_MAX_POS from config
                             if let Some(max_range) = self.x_max_pos {
-                                // Allocate wider space for slider (default width + 30 pixels)
-                                let default_slider_width = ui.available_width();
+                                // Allocate wider space for slider (default slider width + 30 pixels)
+                                // Use egui's default slider width, not available_width (which scales with window)
+                                let default_slider_width = ui.spacing().slider_width;
                                 let slider_width = default_slider_width + 30.0;
                                 let slider_height = ui.spacing().interact_size.y;
                                 
