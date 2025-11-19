@@ -990,7 +990,7 @@ impl eframe::App for StepperGUI {
                             if let Some(max_range) = self.x_max_pos {
                                 // Editable number box (moved to left of slider)
                                 let current_pos = self.positions[x_idx];
-                                let pending = self.pending_positions.entry(x_idx).or_insert(current_pos);
+                                let pending = self.pending_positions.entry(x_idx).or_insert_with(|| current_pos);
                                 let response = ui.add(egui::DragValue::new(pending)
                                     .clamp_range(-100..=max_range)
                                     .speed(10.0));
@@ -1000,18 +1000,22 @@ impl eframe::App for StepperGUI {
                                 let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
                                 
                                 // Only send command when Enter is pressed (lost focus + Enter key)
+                                // Use absolute move for X stepper
                                 if lost_focus && enter_pressed {
                                     let pending_value = *pending;
                                     drop(pending); // Release borrow
-                                    let delta = pending_value - current_pos;
-                                    if delta != 0 {
-                                        self.move_stepper(x_idx, delta);
+                                    if pending_value != current_pos {
+                                        self.move_stepper_absolute_with_source("UI", x_idx, pending_value);
                                     }
                                     self.pending_positions.remove(&x_idx);
-                                } else if !has_focus && *pending != current_pos {
-                                    // Sync pending value when not editing
-                                    *pending = current_pos;
+                                } else if !has_focus {
+                                    // Only sync when widget doesn't have focus AND pending doesn't match current
+                                    // This prevents overwriting user edits while they're typing
+                                    if *pending != current_pos {
+                                        *pending = current_pos;
+                                    }
                                 }
+                                // If has_focus is true, don't sync - let user edit freely
                                 
                                 // Allocate wider space for slider (default slider width + 50 pixels: 30 + 20)
                                 // Use egui's default slider width, not available_width (which scales with window)

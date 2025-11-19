@@ -1268,6 +1268,8 @@ impl Operations {
         if current_x_pos != x_start {
             messages.push(format!("Moving X to absolute position: {} (current: {})", x_start, current_x_pos));
             stepper_ops.abs_move(x_step_index, x_start)?;
+            // Wait for physical movement to complete using x_rest
+            self.rest_x();
             // Position is updated by refresh_positions() in stepper_gui - Arduino knows the position
             // Note: local positions array will be updated when operations_gui polls stepper_gui
         }
@@ -1447,6 +1449,8 @@ impl Operations {
         if current_x_pos != x_finish {
             messages.push(format!("Moving X to absolute position: {} (current: {})", x_finish, current_x_pos));
             stepper_ops.abs_move(x_step_index, x_finish)?;
+            // Wait for physical movement to complete using x_rest
+            self.rest_x();
             // Position is updated by refresh_positions() in stepper_gui - Arduino knows the position
             // Note: local positions array will be updated when operations_gui polls stepper_gui
         }
@@ -1801,7 +1805,7 @@ impl Operations {
         Ok(messages.join("\n"))
     }
     
-    /// X Calibrate operation: moves to home, resets to 0, then moves to away and sets max position
+    /// X Calibrate operation: stores current position, moves to closer of home/away, then returns to stored position
     pub fn x_calibrate<T: StepperOperations>(
         &self,
         stepper_ops: &mut T,
@@ -1820,13 +1824,36 @@ impl Operations {
             return Ok("GPIO not available - cannot calibrate X".to_string());
         }
         
+        let x_max_pos = self.x_max_pos.ok_or_else(|| anyhow!("X_MAX_POS not configured"))?;
+        if x_max_pos <= 0 {
+            return Ok("X_MAX_POS is invalid (must be > 0) - calibration skipped".to_string());
+        }
+        
         let mut messages = Vec::new();
         messages.push("Starting X Calibration...".to_string());
         
-        // Step 1: Move to home
-        messages.push("Step 1: Moving to home position...".to_string());
-        let home_msg = self.x_home(stepper_ops, positions, exit_flag)?;
-        messages.push(home_msg);
+        // Step 1: Store current X position - Arduino is source of truth
+        let stored_x_pos = positions.get(x_step_index).copied().ok_or_else(|| anyhow!("Failed to read X position from Arduino"))?;
+        messages.push(format!("Stored current X position: {}", stored_x_pos));
+        
+        // Step 2: Determine which is closer - home (0) or away (x_max_pos)
+        let distance_to_home = stored_x_pos.abs();
+        let distance_to_away = (x_max_pos - stored_x_pos).abs();
+        
+        let use_home = distance_to_home <= distance_to_away;
+        messages.push(format!("Distance to home: {}, distance to away: {}, choosing {}", 
+            distance_to_home, distance_to_away, if use_home { "home" } else { "away" }));
+        
+        // Step 3: Move to the closer limit
+        if use_home {
+            messages.push("Step 3: Moving to home position...".to_string());
+            let home_msg = self.x_home(stepper_ops, positions, exit_flag)?;
+            messages.push(home_msg);
+        } else {
+            messages.push("Step 3: Moving to away position...".to_string());
+            let away_msg = self.x_away(stepper_ops, positions, exit_flag)?;
+            messages.push(away_msg);
+        }
         
         // Check exit flag
         if let Some(exit) = exit_flag {
@@ -1836,39 +1863,13 @@ impl Operations {
             }
         }
         
-        // Step 2: Reset position to 0 at home
-        messages.push("Step 2: Resetting X position to 0 at home...".to_string());
-        stepper_ops.reset(x_step_index, 0)?;
+        // Step 4: Move back to stored position using absolute move
+        messages.push(format!("Step 4: Moving back to stored position {}...", stored_x_pos));
+        stepper_ops.abs_move(x_step_index, stored_x_pos)?;
+        // Wait for physical movement to complete using x_rest
+        self.rest_x();
         // Position is updated by refresh_positions() - Arduino is source of truth
-        messages.push("X position reset to 0".to_string());
-        
-        // Check exit flag
-        if let Some(exit) = exit_flag {
-            if exit.load(std::sync::atomic::Ordering::Relaxed) {
-                messages.push("Calibration cancelled".to_string());
-                return Ok(messages.join("\n"));
-            }
-        }
-        
-        // Step 3: Move to away
-        messages.push("Step 3: Moving to away position...".to_string());
-        let away_msg = self.x_away(stepper_ops, positions, exit_flag)?;
-        messages.push(away_msg);
-        
-        // Check exit flag
-        if let Some(exit) = exit_flag {
-            if exit.load(std::sync::atomic::Ordering::Relaxed) {
-                messages.push("Calibration cancelled".to_string());
-                return Ok(messages.join("\n"));
-            }
-        }
-        
-        // Step 4: Set max position based on current position
-        let final_pos = positions.get(x_step_index).copied().unwrap_or(0);
-        messages.push(format!("Step 4: Setting max position to {}...", final_pos));
-        // Note: We don't have a set_max_position method, so we just record it
-        // The max position should be stored in the positions array or max_positions map
-        messages.push(format!("X Calibration complete - max position: {}", final_pos));
+        messages.push(format!("X Calibration complete - returned to stored position {}", stored_x_pos));
         
         Ok(messages.join("\n"))
     }
