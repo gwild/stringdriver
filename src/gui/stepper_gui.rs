@@ -60,7 +60,7 @@ impl CommandSet {
 
     fn for_firmware(firmware: ArduinoFirmware) -> Self {
         match firmware {
-            ArduinoFirmware::StringDriverV1 => CommandSet::new(b"2;", 2, 4, 7, 8, 9, 10, 11),
+            ArduinoFirmware::StringDriverV1 => CommandSet::new(b"2;", 3, 4, 7, 8, 9, 10, 11),
             ArduinoFirmware::StringDriverV2 => CommandSet::new(b"1;", 2, 3, 6, 7, 8, 9, 10),
         }
     }
