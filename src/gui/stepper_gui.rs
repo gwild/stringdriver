@@ -363,20 +363,19 @@ impl StepperGUI {
             }
         }
     }
-    fn escape_cmdmessenger_bytes(data: &[u8]) -> Vec<u8> {
+    fn escape_cmdmessenger_bytes(bytes: &[u8]) -> Vec<u8> {
         // PyCmdMessenger escapes: field separator (','), command separator (';'), 
-        // escape separator ('/'), and null bytes ('\0')
-        let mut out = Vec::with_capacity(data.len() * 2); // May double in size if all bytes escaped
-        for &b in data {
-            match b {
-                b'/' | b',' | b';' | 0 => { 
-                    out.push(b'/'); 
-                    out.push(b); 
-                }
-                _ => out.push(b),
+        // and ASCII digits ('0'-'9') using ESC byte 0x47 and XOR with 0x20
+        let mut escaped = Vec::new();
+        for &b in bytes {
+            if b == b',' || b == b';' || b == b'0' || b == b'1' || b == b'2' || b == b'3' || b == b'4' || b == b'5' || b == b'6' || b == b'7' || b == b'8' || b == b'9' {
+                escaped.push(0x47); // ESC
+                escaped.push(b ^ 0x20);
+            } else {
+                escaped.push(b);
             }
         }
-        out
+        escaped
     }
 
     fn pack_i16_le(v: i16) -> [u8; 2] {
