@@ -830,9 +830,7 @@ impl Operations {
                 let remaining = max_pos - current_pos;
                 let move_delta = remaining.min(z_up_step);
                 self.rel_move_z_no_rest(stepper_ops, stepper_idx, move_delta)?;
-                if let Some(pos) = positions.get_mut(stepper_idx) {
-                    *pos += move_delta;
-                }
+                // Position is updated by refresh_positions() - Arduino is source of truth
 
                 // Check if still bumping after move
                 let still_bumping = match gpio.press_check(Some(gpio_index)) {
@@ -863,9 +861,7 @@ impl Operations {
 
             if cleared {
                 stepper_ops.reset(stepper_idx, z_up_step)?;
-                if let Some(pos) = positions.get_mut(stepper_idx) {
-                    *pos = z_up_step;
-                }
+                // Position is updated by refresh_positions() - Arduino is source of truth
                 messages.push(format!(
                     "\nStepper {} bump cleared - controller set to {}.",
                     stepper_idx, z_up_step
@@ -908,29 +904,6 @@ impl Operations {
             messages.push(bump_msg_initial);
         }
         
-        // Set X stepper position to max before Z calibration (like Surfer - set, not move)
-        if let Some(x_idx) = self.x_step_index {
-            if let Some(x_max) = self.x_max_pos {
-                if x_max > 0 {
-                    // Check exit flag
-                    if let Some(exit) = exit_flag {
-                        if exit.load(std::sync::atomic::Ordering::Relaxed) {
-                            messages.push("Operation cancelled".to_string());
-                            return Ok(messages.join("\n"));
-                        }
-                    }
-                    
-                    messages.push(format!("Setting X stepper position to {} (max) before Z calibration...", x_max));
-                    // Set position to max without moving (like Surfer's set_stepper)
-                    stepper_ops.reset(x_idx, x_max)?;
-                    if let Some(pos) = positions.get_mut(x_idx) {
-                        *pos = x_max;
-                    }
-                    messages.push(format!("X stepper position set to {}", x_max));
-                }
-            }
-        }
-        
         let z_indices = self.get_z_stepper_indices();
         let enabled_states = self.get_all_stepper_enabled();
         let z_down_step = self.get_z_down_step();
@@ -966,9 +939,7 @@ impl Operations {
             // Set position to max_pos without moving (like surfer.py's set_stepper)
             // This sets the Arduino's internal position counter without physical movement
             stepper_ops.reset(stepper_idx, max_pos)?;
-            if let Some(pos) = positions.get_mut(stepper_idx) {
-                *pos = max_pos;
-            }
+            // Position is updated by refresh_positions() - Arduino is source of truth
             
             // Move down until sensor is touched
             // Track position locally (like surfer.py's pos_local)
@@ -1012,9 +983,7 @@ impl Operations {
                 // Move down (like surfer.py's rmove with down_step)
                 self.rel_move_z(stepper_ops, stepper_idx, z_down_step)?;
                 pos_local += z_down_step; // Update local position tracker (z_down_step is negative)
-                if let Some(pos) = positions.get_mut(stepper_idx) {
-                    *pos += z_down_step; // Also update positions array
-                }
+                // Position is updated by refresh_positions() - Arduino is source of truth
                 
                 // Wait using z_rest timing (like surfer.py's waiter(config.ins.z_rest))
                 self.rest_z();
@@ -1022,9 +991,7 @@ impl Operations {
             
             if touched {
                 stepper_ops.reset(stepper_idx, 0)?;
-                if let Some(pos) = positions.get_mut(stepper_idx) {
-                    *pos = 0;
-                }
+                // Position is updated by refresh_positions() - Arduino is source of truth
                 messages.push(format!("Stepper {} calibrated (touched sensor, reset to 0)", stepper_idx));
             } else {
                 messages.push(format!("Stepper {} calibration incomplete", stepper_idx));
@@ -1235,9 +1202,7 @@ impl Operations {
                 if too_close {
                     // Move stepper up (away from string)
                     self.rel_move_z(stepper_ops, stepper_to_move, z_up_step)?;
-                    if let Some(pos) = positions.get_mut(stepper_to_move) {
-                        *pos += z_up_step;
-                    }
+                    // Position is updated by refresh_positions() - Arduino is source of truth
                     messages.push(format!(
                         "String {}: too close (amp={:.2}, voices={}), moved stepper {} (closest) up by {}",
                         string_idx, amp_sum, voice_count, stepper_to_move, z_up_step
@@ -1246,9 +1211,7 @@ impl Operations {
                 } else {
                     // Move stepper down (toward string)
                     self.rel_move_z(stepper_ops, stepper_to_move, z_down_step)?;
-                    if let Some(pos) = positions.get_mut(stepper_to_move) {
-                        *pos += z_down_step;
-                    }
+                    // Position is updated by refresh_positions() - Arduino is source of truth
                     messages.push(format!(
                         "String {}: too far (amp={:.2}, voices={}), moved stepper {} (farthest) down by {}",
                         string_idx, amp_sum, voice_count, stepper_to_move, z_down_step
@@ -1297,21 +1260,19 @@ impl Operations {
         let mut messages = Vec::new();
         messages.push(format!("Starting right_left_move: X from {} to {} (step: {})", x_start, x_finish, x_step));
         
-        // Get current X position
+        // Get current X position (may be stale - will be updated by refresh_positions after move)
         let current_x_pos = positions.get(x_step_index).copied().unwrap_or(0);
         
-        // Move to x_start if not already there
+        // Absolute move to x_start if not already there (calculate delta and use rel_move)
         if current_x_pos != x_start {
-            messages.push(format!("Moving X to start position: {}", x_start));
+            messages.push(format!("Moving X to start position: {} (current: {})", x_start, current_x_pos));
             let delta = x_start - current_x_pos;
             self.rel_move_x(stepper_ops, x_step_index, delta)?;
-            if let Some(pos) = positions.get_mut(x_step_index) {
-                *pos = x_start;
-            }
+            // Position is updated by refresh_positions() - Arduino knows the position
         }
         
-        // Move from x_start to x_finish
-        let mut current_x = x_start;
+        // Read current X position from Arduino (after move) - Arduino is source of truth
+        let mut current_x = positions.get(x_step_index).copied().ok_or_else(|| anyhow!("Failed to read X position from Arduino"))?;
         let step_direction = if x_finish > x_start { 1 } else { -1 };
         let abs_step = x_step.abs();
         
@@ -1367,28 +1328,17 @@ impl Operations {
                     pass_count += 1;
                     messages.push(format!("Pass {} of {} successful at X={} (attempt {})", pass_count, adjustment_level, current_x, attempts));
                     
-                    // If we've reached Adjustment Level consecutive passes, move X and break
+                    // If we've reached Adjustment Level consecutive passes, move X by step_size and break
                     if pass_count >= adjustment_level {
-                        messages.push(format!("Adjustment level {} met at X={} after {} attempts, moving X", adjustment_level, current_x, attempts));
+                        messages.push(format!("Adjustment level {} met at X={} after {} attempts, moving X by step size {}", adjustment_level, current_x, attempts, abs_step));
                         
-                        // Move X by one step
+                        // Move X by exactly x_step_size (relative move)
                         let step_delta = step_direction * abs_step;
-                        let next_x = current_x + step_delta;
-                        let final_x = if step_direction > 0 {
-                            next_x.min(x_finish)
-                        } else {
-                            next_x.max(x_finish)
-                        };
-                        let actual_delta = final_x - current_x;
-                        
-                        if actual_delta != 0 {
-                            self.rel_move_x(stepper_ops, x_step_index, actual_delta)?;
-                            if let Some(pos) = positions.get_mut(x_step_index) {
-                                *pos = final_x;
-                            }
-                            current_x = final_x;
-                            messages.push(format!("Moved X to position: {}", current_x));
-                        }
+                        self.rel_move_x(stepper_ops, x_step_index, step_delta)?;
+                        // Position is updated by refresh_positions() - Arduino knows the position
+                        // Read updated position from Arduino for next iteration - Arduino is source of truth
+                        current_x = positions.get(x_step_index).copied().ok_or_else(|| anyhow!("Failed to read X position from Arduino"))?;
+                        messages.push(format!("Moved X by {} to position: {}", step_delta, current_x));
                         
                         // Reset pass counter for next X position
                         pass_count = 0;
@@ -1473,18 +1423,16 @@ impl Operations {
         // Get current X position
         let current_x_pos = positions.get(x_step_index).copied().unwrap_or(0);
         
-        // Move to x_finish if not already there
+        // Absolute move to x_finish if not already there (calculate delta and use rel_move)
         if current_x_pos != x_finish {
-            messages.push(format!("Moving X to start position: {}", x_finish));
+            messages.push(format!("Moving X to start position: {} (current: {})", x_finish, current_x_pos));
             let delta = x_finish - current_x_pos;
             self.rel_move_x(stepper_ops, x_step_index, delta)?;
-            if let Some(pos) = positions.get_mut(x_step_index) {
-                *pos = x_finish;
-            }
+            // Position is updated by refresh_positions() - Arduino knows the position
         }
         
-        // Move from x_finish to x_start
-        let mut current_x = x_finish;
+        // Read current X position from Arduino (after move) - Arduino is source of truth
+        let mut current_x = positions.get(x_step_index).copied().ok_or_else(|| anyhow!("Failed to read X position from Arduino"))?;
         let step_direction = if x_start > x_finish { 1 } else { -1 };
         let abs_step = x_step.abs();
         
@@ -1540,28 +1488,17 @@ impl Operations {
                     pass_count += 1;
                     messages.push(format!("Pass {} of {} successful at X={} (attempt {})", pass_count, adjustment_level, current_x, attempts));
                     
-                    // If we've reached Adjustment Level consecutive passes, move X and break
+                    // If we've reached Adjustment Level consecutive passes, move X by step_size and break
                     if pass_count >= adjustment_level {
-                        messages.push(format!("Adjustment level {} met at X={} after {} attempts, moving X", adjustment_level, current_x, attempts));
+                        messages.push(format!("Adjustment level {} met at X={} after {} attempts, moving X by step size {}", adjustment_level, current_x, attempts, abs_step));
                         
-                        // Move X by one step
+                        // Move X by exactly x_step_size (relative move)
                         let step_delta = step_direction * abs_step;
-                        let next_x = current_x + step_delta;
-                        let final_x = if step_direction > 0 {
-                            next_x.min(x_start)
-                        } else {
-                            next_x.max(x_start)
-                        };
-                        let actual_delta = final_x - current_x;
-                        
-                        if actual_delta != 0 {
-                            self.rel_move_x(stepper_ops, x_step_index, actual_delta)?;
-                            if let Some(pos) = positions.get_mut(x_step_index) {
-                                *pos = final_x;
-                            }
-                            current_x = final_x;
-                            messages.push(format!("Moved X to position: {}", current_x));
-                        }
+                        self.rel_move_x(stepper_ops, x_step_index, step_delta)?;
+                        // Position is updated by refresh_positions() - Arduino knows the position
+                        // Read updated position from Arduino for next iteration - Arduino is source of truth
+                        current_x = positions.get(x_step_index).copied().ok_or_else(|| anyhow!("Failed to read X position from Arduino"))?;
+                        messages.push(format!("Moved X by {} to position: {}", step_delta, current_x));
                         
                         // Reset pass counter for next X position
                         pass_count = 0;
@@ -1646,9 +1583,16 @@ impl Operations {
             return Ok("No X home limit switch configured".to_string());
         }
         
-        // Get current X position
-        let current_x_pos = positions.get(x_step_index).copied().unwrap_or(0);
-        messages.push(format!("Current X position: {}", current_x_pos));
+        // Get max position - required for this operation
+        let x_max_pos = self.x_max_pos.ok_or_else(|| anyhow!("X_MAX_POS not configured"))?;
+        if x_max_pos <= 0 {
+            return Ok("X_MAX_POS is invalid (must be > 0) - operation skipped".to_string());
+        }
+        
+        // Reset X to max position BEFORE moving to home
+        stepper_ops.reset(x_step_index, x_max_pos)?;
+        // Position is updated by refresh_positions() - Arduino is source of truth
+        messages.push(format!("X position reset to max ({}) before moving to home", x_max_pos));
         
         // Move toward home (negative direction) in -10 step increments until GPIO trigger
         const STEP_SIZE: i32 = -10; // Move 10 steps toward home at a time
@@ -1669,13 +1613,7 @@ impl Operations {
             
             if at_home {
                 messages.push("Home GPIO trigger detected".to_string());
-                // Reset position to 0 at home (home is the reference point)
-                stepper_ops.reset(x_step_index, 0)?;
-                if let Some(pos) = positions.get_mut(x_step_index) {
-                    *pos = 0;
-                }
-                messages.push("X position reset to 0 at home".to_string());
-                break; // Exit loop after resetting to 0
+                break; // Exit loop - position will be set to 0 after verification
             }
             
             // Safety check
@@ -1686,9 +1624,7 @@ impl Operations {
             
             // Move -10 steps toward home
             self.rel_move_x(stepper_ops, x_step_index, STEP_SIZE)?;
-            if let Some(pos) = positions.get_mut(x_step_index) {
-                *pos += STEP_SIZE;
-            }
+            // Position is updated by refresh_positions() in stepper_ops.rel_move(), don't manually update
             iterations += 1;
             
             if iterations % 10 == 0 {
@@ -1696,17 +1632,25 @@ impl Operations {
             }
         }
         
-        // Verify we're at home with position 0, if not disable stepper
+        // Verify we're at home with position 0
         let final_pos = positions.get(x_step_index).copied().unwrap_or(0);
         let still_at_home = gpio.x_home_check().unwrap_or(false);
         
-        if final_pos == 0 && still_at_home {
-            messages.push(format!("X Home complete - position: {}, verified at home", final_pos));
+        if still_at_home {
+            // Home verified by GPIO - set X to 0
+            stepper_ops.reset(x_step_index, 0)?;
+            // Position is updated by refresh_positions() - Arduino is source of truth
+            messages.push(format!("X Home complete - position set to 0, verified at home"));
         } else {
-            messages.push(format!("X Home failed - position: {}, at_home: {}", final_pos, still_at_home));
-            messages.push("Disabling X stepper due to home failure".to_string());
-            self.set_stepper_enabled(x_step_index, false);
-            stepper_ops.disable(x_step_index)?;
+            // Never reached home - check if Arduino position is already 0
+            if final_pos == 0 {
+                messages.push(format!("X Home failed - never reached home and Arduino position is already 0"));
+                messages.push("Disabling X stepper due to home failure".to_string());
+                self.set_stepper_enabled(x_step_index, false);
+                stepper_ops.disable(x_step_index)?;
+            } else {
+                messages.push(format!("X Home failed - never reached home, position: {}", final_pos));
+            }
         }
         
         Ok(messages.join("\n"))
@@ -1743,9 +1687,7 @@ impl Operations {
         
         // Set X to 0 first
         stepper_ops.reset(x_step_index, 0)?;
-        if let Some(pos) = positions.get_mut(x_step_index) {
-            *pos = 0;
-        }
+        // Position is updated by refresh_positions() - Arduino is source of truth
         messages.push("X position set to 0".to_string());
         
         // Move toward away (positive direction) in +10 step increments until max pos or GPIO trigger
@@ -1762,7 +1704,7 @@ impl Operations {
                 }
             }
             
-            // Get current position
+            // Get current position (updated by refresh_positions() in previous iteration)
             let current_pos = positions.get(x_step_index).copied().unwrap_or(0);
             
             // Check if we've reached max position
@@ -1786,33 +1728,36 @@ impl Operations {
             
             // Move +10 steps toward away
             self.rel_move_x(stepper_ops, x_step_index, STEP_SIZE)?;
-            if let Some(pos) = positions.get_mut(x_step_index) {
-                *pos += STEP_SIZE;
-            }
+            // Position is updated by refresh_positions() in stepper_ops.rel_move(), don't manually update
+            // The local positions array will be updated when operations_gui polls stepper_gui
             iterations += 1;
             
             if iterations % 10 == 0 {
-                messages.push(format!("Moving toward away... (iteration {}, position: {})", iterations, current_pos + STEP_SIZE));
+                // Read current position for logging (may be stale until next poll)
+                let logged_pos = positions.get(x_step_index).copied().unwrap_or(0);
+                messages.push(format!("Moving toward away... (iteration {}, position: {})", iterations, logged_pos));
             }
         }
         
-        // Check final state: if max pos reached without GPIO, disable stepper; else set to max pos
+        // Check final state: if GPIO verified, set to max; if never reached away and at max, disable
         let final_pos = positions.get(x_step_index).copied().unwrap_or(0);
         let at_away_gpio = gpio.x_away_check().unwrap_or(false);
         
-        if final_pos >= x_max_pos && !at_away_gpio {
-            // Reached max position without GPIO trigger - disable stepper
-            messages.push(format!("X Away failed - reached max position ({}) without GPIO trigger", x_max_pos));
-            messages.push("Disabling X stepper due to away failure".to_string());
-            self.set_stepper_enabled(x_step_index, false);
-            stepper_ops.disable(x_step_index)?;
-        } else {
-            // GPIO trigger hit - set X to max pos
+        if at_away_gpio {
+            // Away verified by GPIO - set X to max pos
             stepper_ops.reset(x_step_index, x_max_pos)?;
-            if let Some(pos) = positions.get_mut(x_step_index) {
-                *pos = x_max_pos;
+            // Position is updated by refresh_positions() - Arduino is source of truth
+            messages.push(format!("X Away complete - position set to max: {}, verified at away", x_max_pos));
+        } else {
+            // Never reached away - check if Arduino position is already at max
+            if final_pos >= x_max_pos {
+                messages.push(format!("X Away failed - never reached away and Arduino position is already at max ({})", final_pos));
+                messages.push("Disabling X stepper due to away failure".to_string());
+                self.set_stepper_enabled(x_step_index, false);
+                stepper_ops.disable(x_step_index)?;
+            } else {
+                messages.push(format!("X Away failed - never reached away, position: {}", final_pos));
             }
-            messages.push(format!("X Away complete - position set to max: {}", x_max_pos));
         }
         
         Ok(messages.join("\n"))
@@ -1856,9 +1801,7 @@ impl Operations {
         // Step 2: Reset position to 0 at home
         messages.push("Step 2: Resetting X position to 0 at home...".to_string());
         stepper_ops.reset(x_step_index, 0)?;
-        if let Some(pos) = positions.get_mut(x_step_index) {
-            *pos = 0;
-        }
+        // Position is updated by refresh_positions() - Arduino is source of truth
         messages.push("X position reset to 0".to_string());
         
         // Check exit flag

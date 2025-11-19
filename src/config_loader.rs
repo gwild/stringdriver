@@ -212,7 +212,7 @@ pub fn load_operations_settings(hostname: &str) -> Result<OperationsSettings> {
 
     let bump_check_enable = host_block.get(&serde_yaml::Value::from("BUMP_CHECK_ENABLE"))
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .unwrap_or(true);
 
     let tune_rest = host_block.get(&serde_yaml::Value::from("TUNE_REST"))
         .and_then(|v| v.as_f64())

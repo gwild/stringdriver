@@ -653,15 +653,37 @@ impl OperationsGUI {
         }
         drop(ops_guard);
         
-        let max_idx = all_indices.iter().max().copied().unwrap_or(0);
-        let mut positions = vec![0i32; max_idx + 1];
-        let current_positions_snapshot = self.stepper_positions
+        // Fetch current positions from stepper_gui before starting operation to ensure accuracy
+        let mut positions_snapshot = self.stepper_positions
             .lock()
             .map(|map| map.clone())
             .unwrap_or_default();
+        
+        // Try to fetch fresh positions from stepper_gui socket before starting operation
+        if let Some(ref arduino_ops) = self.arduino_ops {
+            if let Ok(ops_guard) = arduino_ops.lock() {
+                let socket_path = ops_guard.socket_path();
+                drop(ops_guard);
+                if let Ok(fresh_positions) = ArduinoStepperOps::fetch_positions_from_socket(&socket_path) {
+                    // Update snapshot with fresh positions
+                    for (idx, pos) in fresh_positions.iter().enumerate() {
+                        positions_snapshot.insert(idx, *pos);
+                    }
+                    // Also update stepper_positions map
+                    if let Ok(mut map) = self.stepper_positions.lock() {
+                        for (idx, pos) in fresh_positions.iter().enumerate() {
+                            map.insert(idx, *pos);
+                        }
+                    }
+                }
+            }
+        }
+        
+        let max_idx = all_indices.iter().max().copied().unwrap_or(0);
+        let mut positions = vec![0i32; max_idx + 1];
         for &idx in &all_indices {
             if idx < positions.len() {
-                positions[idx] = current_positions_snapshot.get(&idx).copied().unwrap_or(0);
+                positions[idx] = positions_snapshot.get(&idx).copied().unwrap_or(0);
             }
         }
         let mut max_positions = std::collections::HashMap::new();
