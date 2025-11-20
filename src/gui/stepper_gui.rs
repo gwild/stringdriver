@@ -390,7 +390,6 @@ impl StepperGUI {
         // PyCmdMessenger sends "il" format: int (2 bytes) for stepper, long (4 bytes) for value
         // But Arduino reads both as int - that's fine, it just reads first 2 bytes of the long
         if self.port.is_none() { return; }
-        self.log(&format!("DEBUG: Sending command ID {} (ASCII '{}') for stepper {}, value {}", cmd_id, (b'0' + cmd_id) as char, stepper_idx, value));
         let mut buf: Vec<u8> = Vec::with_capacity(20);
         // Command ID as ASCII digit
         buf.push(b'0' + cmd_id);
