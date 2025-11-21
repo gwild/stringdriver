@@ -363,19 +363,20 @@ impl StepperGUI {
             }
         }
     }
-    fn escape_cmdmessenger_bytes(bytes: &[u8]) -> Vec<u8> {
+    fn escape_cmdmessenger_bytes(data: &[u8]) -> Vec<u8> {
         // PyCmdMessenger escapes: field separator (','), command separator (';'), 
-        // and ASCII digits ('0'-'9') using ESC byte 0x47 and XOR with 0x20
-        let mut escaped = Vec::new();
-        for &b in bytes {
-            if b == b',' || b == b';' || b == b'0' || b == b'1' || b == b'2' || b == b'3' || b == b'4' || b == b'5' || b == b'6' || b == b'7' || b == b'8' || b == b'9' {
-                escaped.push(0x47); // ESC
-                escaped.push(b ^ 0x20);
-            } else {
-                escaped.push(b);
+        // escape separator ('/'), and null bytes ('\0')
+        let mut out = Vec::with_capacity(data.len() * 2); // May double in size if all bytes escaped
+        for &b in data {
+            match b {
+                b'/' | b',' | b';' | 0 => { 
+                    out.push(b'/'); 
+                    out.push(b); 
+                }
+                _ => out.push(b),
             }
         }
-        escaped
+        out
     }
 
     fn pack_i16_le(v: i16) -> [u8; 2] {
@@ -404,9 +405,22 @@ impl StepperGUI {
         let escaped_value = Self::escape_cmdmessenger_bytes(&value_bytes);
         buf.extend_from_slice(&escaped_value);
         buf.push(b';');
-        if let Some(p) = self.port.as_mut() {
-            let _ = p.write_all(&buf);
-            let _ = p.flush();
+        self.log(&format!("SEND BIN: {:?}", buf));
+        let write_err = if let Some(p) = self.port.as_mut() {
+            p.write_all(&buf).err()
+        } else {
+            None
+        };
+        let flush_err = if let Some(p) = self.port.as_mut() {
+            p.flush().err()
+        } else {
+            None
+        };
+        if let Some(e) = write_err {
+            self.log(&format!("ERROR: Failed to write to port: {}", e));
+        }
+        if let Some(e) = flush_err {
+            self.log(&format!("ERROR: Failed to flush port: {}", e));
         }
     }
     fn log(&mut self, message: &str) {
@@ -449,6 +463,7 @@ impl StepperGUI {
     fn refresh_positions(&mut self) {
         if self.port.is_some() {
             let send = self.command_set.positions_cmd;
+            self.log(&format!("SEND: {:?}", send));
             let received = {
                 let port = self.port.as_mut().unwrap();
                 // Flush input buffer before command (mirror Python's flushInput)
@@ -501,6 +516,7 @@ impl StepperGUI {
             };
 
             if let Some(buffer) = received {
+                self.log(&format!("RECV: {:?}", buffer));
                 // Decode CmdMessenger: "1,<escaped-binary>;"
                 let mut data_bytes: Vec<u8> = Vec::new();
                 let mut seen_comma = false;
