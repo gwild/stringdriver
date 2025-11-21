@@ -424,7 +424,7 @@ impl StepperGUI {
         let escaped_value = Self::escape_cmdmessenger_bytes(&value_bytes);
         buf.extend_from_slice(&escaped_value);
         buf.push(b';');
-        self.log(&format!("SEND BIN: {:?}", buf));
+        // self.log(&format!("SEND BIN: {:?}", buf));
         let write_err = if let Some(p) = self.port.as_mut() {
             p.write_all(&buf).err()
         } else {
@@ -482,7 +482,7 @@ impl StepperGUI {
     fn refresh_positions(&mut self) {
         if self.port.is_some() {
             let send = self.command_set.positions_cmd;
-            self.log(&format!("SEND: {:?}", send));
+            // self.log(&format!("SEND: {:?}", send));
             let received = {
                 let port = self.port.as_mut().unwrap();
                 // Flush input buffer before command (mirror Python's flushInput)
@@ -535,7 +535,7 @@ impl StepperGUI {
             };
 
             if let Some(buffer) = received {
-                self.log(&format!("RECV: {:?}", buffer));
+                // self.log(&format!("RECV: {:?}", buffer));
                 // Decode CmdMessenger: "1,<escaped-binary>;"
                 let mut data_bytes: Vec<u8> = Vec::new();
                 let mut seen_comma = false;

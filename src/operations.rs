@@ -1151,8 +1151,15 @@ impl Operations {
             }
             
             // Check if adjustment is needed
-            let too_close = amp_sum > max_thresh || voice_count > max_voice;
-            let too_far = amp_sum < min_thresh || voice_count < min_voice;
+            // Prioritize voice_count violations - they're more critical
+            let voice_too_high = voice_count > max_voice;
+            let voice_too_low = voice_count < min_voice;
+            let amp_too_high = amp_sum > max_thresh;
+            let amp_too_low = amp_sum < min_thresh;
+            
+            // Determine adjustment direction: voice_count takes precedence
+            let too_close = voice_too_high || (amp_too_high && !voice_too_low);
+            let too_far = voice_too_low || (amp_too_low && !voice_too_high);
             
             if too_close || too_far {
                 // Determine which stepper to move based on adjustment direction
@@ -1203,18 +1210,32 @@ impl Operations {
                     // Move stepper up (away from string)
                     self.rel_move_z(stepper_ops, stepper_to_move, z_up_step)?;
                     // Position is updated by refresh_positions() - Arduino is source of truth
+                    let reason = if voice_too_high {
+                        format!("voices={} > max={}", voice_count, max_voice)
+                    } else if amp_too_high {
+                        format!("amp={:.2} > max={:.2}", amp_sum, max_thresh)
+                    } else {
+                        "unknown".to_string()
+                    };
                     messages.push(format!(
-                        "String {}: too close (amp={:.2}, voices={}), moved stepper {} (closest) up by {}",
-                        string_idx, amp_sum, voice_count, stepper_to_move, z_up_step
+                        "String {}: too close ({}, amp={:.2}, voices={}), moved stepper {} (closest) up by {}",
+                        string_idx, reason, amp_sum, voice_count, stepper_to_move, z_up_step
                     ));
                     self.rest_lap();
                 } else {
                     // Move stepper down (toward string)
                     self.rel_move_z(stepper_ops, stepper_to_move, z_down_step)?;
                     // Position is updated by refresh_positions() - Arduino is source of truth
+                    let reason = if voice_too_low {
+                        format!("voices={} < min={}", voice_count, min_voice)
+                    } else if amp_too_low {
+                        format!("amp={:.2} < min={:.2}", amp_sum, min_thresh)
+                    } else {
+                        "unknown".to_string()
+                    };
                     messages.push(format!(
-                        "String {}: too far (amp={:.2}, voices={}), moved stepper {} (farthest) down by {}",
-                        string_idx, amp_sum, voice_count, stepper_to_move, z_down_step
+                        "String {}: too far ({}, amp={:.2}, voices={}), moved stepper {} (farthest) down by {}",
+                        string_idx, reason, amp_sum, voice_count, stepper_to_move, z_down_step
                     ));
                     self.rest_lap();
                 }
@@ -1321,13 +1342,24 @@ impl Operations {
                 // Run bump_check
                 let bump_msg = self.bump_check(None, positions, max_positions, stepper_ops, exit_flag)?;
                 
+                // Check if bump_check passed (no CRITICAL errors, no bumps detected)
+                // bump_check returns empty string if no bumps, or messages if bumps were detected/cleared
+                // A CRITICAL message means a stepper was disabled - this is a failure
+                // If bumps were detected (even if cleared), that means steppers were touching - this is a failure
+                let bump_check_passed = !bump_msg.contains("CRITICAL") && 
+                    !bump_msg.contains("bump cleared") &&
+                    !bump_msg.contains("bumping") &&
+                    (bump_msg.trim().is_empty() || 
+                     bump_msg.contains("bump_check disabled") || 
+                     bump_msg.contains("no GPIO"));
+                
                 // Get current voice counts and amp sums
                 let voice_counts = self.get_voice_count();
                 let amp_sums = self.get_amp_sum();
                 
                 // Check if all channels are within their min/max ranges (green indicators)
                 // A pass is when voice_count AND amp_sum for all channels are within their ranges
-                let all_pass = (0..self.string_num).all(|string_idx| {
+                let voice_amp_pass = (0..self.string_num).all(|string_idx| {
                     if string_idx >= amp_sums.len() || string_idx >= voice_counts.len() {
                         return false;
                     }
@@ -1343,6 +1375,9 @@ impl Operations {
                     amp_sum >= min_thresh && amp_sum <= max_thresh &&
                     voice_count >= min_voice && voice_count <= max_voice
                 });
+                
+                // A pass requires BOTH bump_check passed AND voice/amp checks passed
+                let all_pass = bump_check_passed && voice_amp_pass;
                 
                 if all_pass {
                     // Successful pass - increment pass counter
@@ -1369,7 +1404,22 @@ impl Operations {
                 } else {
                     // Adjustment failed - reset pass counter
                     if pass_count > 0 {
-                        messages.push(format!("Adjustment failed at X={}, resetting pass count from {} to 0", current_x, pass_count));
+                        let failure_reason = if !bump_check_passed {
+                            "bump_check failed"
+                        } else if !voice_amp_pass {
+                            "voice/amp checks failed"
+                        } else {
+                            "unknown"
+                        };
+                        messages.push(format!("Adjustment failed at X={} ({}), resetting pass count from {} to 0", current_x, failure_reason, pass_count));
+                    } else {
+                        // Log why it failed even if pass_count was 0
+                        if !bump_check_passed {
+                            messages.push(format!("bump_check failed at X={}: {}", current_x, bump_msg.trim()));
+                        }
+                        if !voice_amp_pass {
+                            messages.push(format!("voice/amp checks failed at X={}", current_x));
+                        }
                     }
                     pass_count = 0;
                 }
@@ -1502,13 +1552,24 @@ impl Operations {
                 // Run bump_check
                 let bump_msg = self.bump_check(None, positions, max_positions, stepper_ops, exit_flag)?;
                 
+                // Check if bump_check passed (no CRITICAL errors, no bumps detected)
+                // bump_check returns empty string if no bumps, or messages if bumps were detected/cleared
+                // A CRITICAL message means a stepper was disabled - this is a failure
+                // If bumps were detected (even if cleared), that means steppers were touching - this is a failure
+                let bump_check_passed = !bump_msg.contains("CRITICAL") && 
+                    !bump_msg.contains("bump cleared") &&
+                    !bump_msg.contains("bumping") &&
+                    (bump_msg.trim().is_empty() || 
+                     bump_msg.contains("bump_check disabled") || 
+                     bump_msg.contains("no GPIO"));
+                
                 // Get current voice counts and amp sums
                 let voice_counts = self.get_voice_count();
                 let amp_sums = self.get_amp_sum();
                 
                 // Check if all channels are within their min/max ranges (green indicators)
                 // A pass is when voice_count AND amp_sum for all channels are within their ranges
-                let all_pass = (0..self.string_num).all(|string_idx| {
+                let voice_amp_pass = (0..self.string_num).all(|string_idx| {
                     if string_idx >= amp_sums.len() || string_idx >= voice_counts.len() {
                         return false;
                     }
@@ -1524,6 +1585,9 @@ impl Operations {
                     amp_sum >= min_thresh && amp_sum <= max_thresh &&
                     voice_count >= min_voice && voice_count <= max_voice
                 });
+                
+                // A pass requires BOTH bump_check passed AND voice/amp checks passed
+                let all_pass = bump_check_passed && voice_amp_pass;
                 
                 if all_pass {
                     // Successful pass - increment pass counter
@@ -1550,7 +1614,22 @@ impl Operations {
                 } else {
                     // Adjustment failed - reset pass counter
                     if pass_count > 0 {
-                        messages.push(format!("Adjustment failed at X={}, resetting pass count from {} to 0", current_x, pass_count));
+                        let failure_reason = if !bump_check_passed {
+                            "bump_check failed"
+                        } else if !voice_amp_pass {
+                            "voice/amp checks failed"
+                        } else {
+                            "unknown"
+                        };
+                        messages.push(format!("Adjustment failed at X={} ({}), resetting pass count from {} to 0", current_x, failure_reason, pass_count));
+                    } else {
+                        // Log why it failed even if pass_count was 0
+                        if !bump_check_passed {
+                            messages.push(format!("bump_check failed at X={}: {}", current_x, bump_msg.trim()));
+                        }
+                        if !voice_amp_pass {
+                            messages.push(format!("voice/amp checks failed at X={}", current_x));
+                        }
                     }
                     pass_count = 0;
                 }

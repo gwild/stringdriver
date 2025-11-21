@@ -61,6 +61,37 @@ fn main() {
         }
     }
     
+    // Check if audmon release binary exists and is up-to-date
+    let audmon_release_dir = audmon_path.join("target/release");
+    let audmon_binary = audmon_release_dir.join("audio_monitor");
+    let needs_build = check_binary_needs_build(&audmon_path, &audmon_binary);
+    
+    if needs_build {
+        println!("Building audmon release binary...");
+        let build_status = Command::new("cargo")
+            .args(&["build", "--release", "--bin", "audio_monitor"])
+            .current_dir(&audmon_path)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status();
+        
+        match build_status {
+            Ok(status) if status.success() => {
+                println!("✓ audmon release binary built successfully");
+            }
+            Ok(status) => {
+                eprintln!("✗ audmon build failed with exit code: {:?}", status.code());
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("✗ Failed to run cargo build for audmon: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        println!("✓ audmon release binary is up-to-date");
+    }
+    
     let audmon_script = audmon_path.join("audmon.sh");
     if !audmon_script.exists() {
         eprintln!("✗ audmon.sh not found at {}", audmon_script.display());
@@ -103,41 +134,55 @@ fn main() {
     let gpio_enabled = check_gpio_enabled(&project_root);
     println!("\nGPIO enabled for this host: {}", gpio_enabled);
     
-    // Always build release binaries to ensure latest code is used
-    println!("\nBuilding release binaries...");
-    println!("  This may take a while - compiling stepper_gui and operations_gui...");
-    println!("  (Cargo build output will appear below)\n");
-    std::io::stdout().flush().ok();
+    // Check if binaries need rebuilding
+    let stepper_gui_binary = release_dir.join("stepper_gui");
+    let operations_gui_binary = release_dir.join("operations_gui");
+    let stepper_needs_build = check_binary_needs_build(&project_root, &stepper_gui_binary);
+    let operations_needs_build = check_binary_needs_build(&project_root, &operations_gui_binary);
     
-    let mut build_args = vec!["build", "--release"];
-    if gpio_enabled {
-        build_args.push("--features");
-        build_args.push("gpiod");
-    }
-    build_args.push("--bin");
-    build_args.push("stepper_gui");
-    build_args.push("--bin");
-    build_args.push("operations_gui");
-    
-    let build_status = Command::new("cargo")
-        .args(&build_args)
-        .current_dir(&project_root)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status();
-    
-    match build_status {
-        Ok(status) if status.success() => {
-            println!("\n✓ Release binaries built successfully");
+    if stepper_needs_build || operations_needs_build {
+        println!("\nBuilding release binaries...");
+        if stepper_needs_build {
+            println!("  stepper_gui needs rebuild");
         }
-        Ok(status) => {
-            eprintln!("\n✗ Build failed with exit code: {:?}", status.code());
-            std::process::exit(1);
+        if operations_needs_build {
+            println!("  operations_gui needs rebuild");
         }
-        Err(e) => {
-            eprintln!("\n✗ Failed to run cargo build: {}", e);
-            std::process::exit(1);
+        println!("  (Cargo build output will appear below)\n");
+        std::io::stdout().flush().ok();
+        
+        let mut build_args = vec!["build", "--release"];
+        if gpio_enabled {
+            build_args.push("--features");
+            build_args.push("gpiod");
         }
+        build_args.push("--bin");
+        build_args.push("stepper_gui");
+        build_args.push("--bin");
+        build_args.push("operations_gui");
+        
+        let build_status = Command::new("cargo")
+            .args(&build_args)
+            .current_dir(&project_root)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status();
+        
+        match build_status {
+            Ok(status) if status.success() => {
+                println!("\n✓ Release binaries built successfully");
+            }
+            Ok(status) => {
+                eprintln!("\n✗ Build failed with exit code: {:?}", status.code());
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("\n✗ Failed to run cargo build: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        println!("\n✓ Release binaries are up-to-date");
     }
     
     // Launch stepper_gui
@@ -355,6 +400,96 @@ fn wait_for_stepper_socket(project_root: &std::path::Path) -> bool {
         }
     }
     
+    false
+}
+
+/// Check if a binary needs a fresh release build
+/// Returns true if binary doesn't exist or source files are newer than binary
+fn check_binary_needs_build(project_root: &std::path::Path, binary_path: &std::path::Path) -> bool {
+    // If binary doesn't exist, needs build
+    if !binary_path.exists() {
+        return true;
+    }
+    
+    // Get binary modification time
+    let binary_mtime = match std::fs::metadata(binary_path) {
+        Ok(meta) => meta.modified().ok(),
+        Err(_) => return true, // If we can't read binary, rebuild
+    };
+    
+    let binary_mtime = match binary_mtime {
+        Some(t) => t,
+        None => return true, // Can't get mtime, rebuild
+    };
+    
+    // Check Cargo files
+    let cargo_files = ["Cargo.toml", "Cargo.lock", "build.rs"];
+    for file_name in cargo_files.iter() {
+        let file_path = project_root.join(file_name);
+        if file_path.exists() {
+            if let Ok(meta) = std::fs::metadata(&file_path) {
+                if let Ok(file_mtime) = meta.modified() {
+                    if file_mtime > binary_mtime {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Check Rust source files
+    let src_dir = project_root.join("src");
+    if src_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&src_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let ext = path.extension().and_then(|s| s.to_str());
+                    if ext == Some("rs") || ext == Some("toml") {
+                        if let Ok(meta) = std::fs::metadata(&path) {
+                            if let Ok(file_mtime) = meta.modified() {
+                                if file_mtime > binary_mtime {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                } else if path.is_dir() {
+                    // Recursively check subdirectories
+                    if check_dir_newer_than(&path, binary_mtime) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    
+    false
+}
+
+/// Recursively check if any files in directory are newer than given time
+fn check_dir_newer_than(dir_path: &std::path::Path, threshold: std::time::SystemTime) -> bool {
+    if let Ok(entries) = std::fs::read_dir(dir_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let ext = path.extension().and_then(|s| s.to_str());
+                if ext == Some("rs") || ext == Some("toml") {
+                    if let Ok(meta) = std::fs::metadata(&path) {
+                        if let Ok(file_mtime) = meta.modified() {
+                            if file_mtime > threshold {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            } else if path.is_dir() {
+                if check_dir_newer_than(&path, threshold) {
+                    return true;
+                }
+            }
+        }
+    }
     false
 }
 

@@ -1558,7 +1558,10 @@ impl eframe::App for OperationsGUI {
             // Display messages (debug log style)
             ui.collapsing("Messages", |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("Copy log").clicked() {
+                    if ui.button("Clear").clicked() {
+                        self.message.clear();
+                    }
+                    if ui.button("Copy").clicked() {
                         let log = self.message.clone();
                         ui.output_mut(|o| o.copied_text = log);
                     }
