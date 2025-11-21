@@ -604,8 +604,15 @@ impl StepperGUI {
             let _ = p.clear(serialport::ClearBuffer::Input);
         }
         let s = stepper as i16;
-        self.log(&format!(">>> {} MOVING stepper {} by {} (rmove command)", source, stepper, delta));
-        self.send_cmd_bin(self.command_set.rmove_id, s, delta);
+        // V1 firmware multiplies X stepper (index 2) moves by 2, so divide by 2 to compensate
+        let adjusted_delta = if self.firmware == ArduinoFirmware::StringDriverV1 
+            && self.x_step_index == Some(stepper) {
+            delta / 2
+        } else {
+            delta
+        };
+        self.log(&format!(">>> {} MOVING stepper {} by {} (rmove command, adjusted: {})", source, stepper, delta, adjusted_delta));
+        self.send_cmd_bin(self.command_set.rmove_id, s, adjusted_delta);
         self.log(&format!("Command sent, waiting for Arduino..."));
         // Arduino move is synchronous - wait for it to complete
         thread::sleep(Duration::from_millis(500));
