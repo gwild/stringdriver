@@ -60,7 +60,7 @@ impl CommandSet {
 
     fn for_firmware(firmware: ArduinoFirmware) -> Self {
         match firmware {
-            ArduinoFirmware::StringDriverV1 => CommandSet::new(b"2;", 2, 4, 7, 8, 9, 10, 11),
+            ArduinoFirmware::StringDriverV1 => CommandSet::new(b"2;", 3, 4, 7, 8, 9, 10, 11),
             ArduinoFirmware::StringDriverV2 => CommandSet::new(b"1;", 2, 3, 6, 7, 8, 9, 10),
         }
     }
@@ -90,11 +90,13 @@ struct StepperGUI {
     tuner_speed: i32,
     tuner_min: i32,
     tuner_max: i32,
+    tuner_step: i32, // Step size for tuner inc/dec buttons
     // X stepper parameters
     x_accel: i32,
     x_speed: i32,
     x_min: i32,
     x_max: i32,
+    x_step: i32, // Step size for X stepper movement
     // Z stepper parameters (applied to all z steppers)
     z_accel: i32,
     z_speed: i32,
@@ -133,10 +135,12 @@ impl Default for StepperGUI {
             tuner_speed: 250,
             tuner_min: -100000,
             tuner_max: 100000,
+            tuner_step: 100,
             x_accel: 10000,
             x_speed: 500,
             x_min: 0,
             x_max: 2600,
+            x_step: 10,
             z_accel: 10000,
             z_speed: 100,
             z_min: -100,
@@ -165,7 +169,7 @@ impl StepperGUI {
         stream.flush()
     }
 
-    fn new(port_path: String, num_steppers: usize, string_num: usize, x_step_index: Option<usize>, z_first_index: Option<usize>, tuner_first_index: Option<usize>, tuner_port_path: Option<String>, tuner_num_steppers: Option<usize>, debug: bool, debug_file: Option<File>, z_up_step: i32, z_down_step: i32, firmware: ArduinoFirmware, x_max_pos: Option<i32>) -> Self {
+    fn new(port_path: String, num_steppers: usize, string_num: usize, x_step_index: Option<usize>, z_first_index: Option<usize>, tuner_first_index: Option<usize>, tuner_port_path: Option<String>, tuner_num_steppers: Option<usize>, debug: bool, debug_file: Option<File>, z_up_step: i32, z_down_step: i32, firmware: ArduinoFirmware, x_max_pos: Option<i32>, x_step: i32) -> Self {
         let mut s = Self::default();
         s.port_path = port_path;
         s.positions = vec![0; num_steppers];
@@ -200,6 +204,7 @@ impl StepperGUI {
         }
         s.z_up_step = z_up_step;
         s.z_down_step = z_down_step;
+        s.x_step = x_step;
         s.log(&format!("Initialized: {} steppers, {} active string pairs", num_steppers, string_num));
         if tuner_first_index.is_some() {
             if tuner_port_path.is_some() {
@@ -453,6 +458,14 @@ impl StepperGUI {
                 self.connected = true;
                 self.log("Connected. Requesting positions...");
                 self.refresh_positions();
+                // Initialize X stepper min/max if X stepper exists
+                if self.x_step_index.is_some() {
+                    self.log(&format!("Initializing X stepper min/max: min={}, max={}", self.x_min, self.x_max));
+                    self.set_min(1, self.x_min); // X stepper (gantry) uses axis index 1
+                    thread::sleep(Duration::from_millis(100));
+                    self.set_max(1, self.x_max); // X stepper (gantry) uses axis index 1
+                    thread::sleep(Duration::from_millis(100));
+                }
             }
             Err(e) => {
                 self.log(&format!("Connection failed: {}", e));
@@ -840,6 +853,26 @@ impl StepperGUI {
         }
     }
 
+    fn move_tuner_absolute(&mut self, tuner_idx: usize, position: i32) {
+        if self.tuner_port.is_some() {
+            // Tuners on separate board
+            if let Some(ref mut port) = self.tuner_port {
+                let _ = port.clear(serialport::ClearBuffer::Input);
+            }
+            let t = tuner_idx as i16;
+            self.log(&format!(">>> MOVING tuner {} to absolute position {} (amove command)", tuner_idx, position));
+            self.send_cmd_bin_tuner(self.tuner_command_set.amove_id, t, position);
+            thread::sleep(Duration::from_millis(500));
+            self.refresh_tuner_positions();
+        } else if self.tuner_first_index.is_some() {
+            // Tuners on main board - use main board
+            if let Some(tuner_first) = self.tuner_first_index {
+                let main_idx = tuner_first + tuner_idx;
+                self.move_stepper_absolute_with_source("UI", main_idx, position);
+            }
+        }
+    }
+
     fn send_cmd_bin_tuner(&mut self, cmd_id: u8, stepper_idx: i16, value: i32) {
         if self.tuner_port.is_none() { return; }
         let mut buf: Vec<u8> = Vec::with_capacity(20);
@@ -1000,38 +1033,40 @@ impl eframe::App for StepperGUI {
                             let mut pos = self.positions[x_idx];
                             // Clamp position for display (min 0) but keep actual value for editing
                             let display_pos = pos.max(0);
-                            // Read-only horizontal slider for visualization
-                            // Use X_MAX_POS from config
-                            if let Some(max_range) = self.x_max_pos {
-                                // Editable number box (moved to left of slider)
-                                let current_pos = self.positions[x_idx];
-                                let pending = self.pending_positions.entry(x_idx).or_insert_with(|| current_pos);
-                                let response = ui.add(egui::DragValue::new(pending)
-                                    .clamp_range(-100..=max_range)
-                                    .speed(10.0));
-                                
-                                let has_focus = response.has_focus();
-                                let lost_focus = response.lost_focus();
-                                let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                
-                                // Only send command when Enter is pressed (lost focus + Enter key)
-                                // Use absolute move for X stepper
-                                if lost_focus && enter_pressed {
-                                    let pending_value = *pending;
-                                    drop(pending); // Release borrow
-                                    if pending_value != current_pos {
-                                        self.move_stepper_absolute_with_source("UI", x_idx, pending_value);
-                                    }
-                                    self.pending_positions.remove(&x_idx);
-                                } else if !has_focus {
-                                    // Only sync when widget doesn't have focus AND pending doesn't match current
-                                    // This prevents overwriting user edits while they're typing
-                                    if *pending != current_pos {
-                                        *pending = current_pos;
-                                    }
+                            // Use X_MAX_POS from config, or default to 2600 if not set
+                            let max_range = self.x_max_pos.unwrap_or(2600);
+                            
+                            // Editable number box - always shown
+                            let current_pos = self.positions[x_idx];
+                            let pending = self.pending_positions.entry(x_idx).or_insert_with(|| current_pos);
+                            let response = ui.add(egui::DragValue::new(pending)
+                                .clamp_range(-100..=max_range)
+                                .speed(10.0));
+                            
+                            let has_focus = response.has_focus();
+                            let lost_focus = response.lost_focus();
+                            let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            
+                            // Only send command when Enter is pressed (lost focus + Enter key)
+                            // Use absolute move for X stepper
+                            if lost_focus && enter_pressed {
+                                let pending_value = *pending;
+                                drop(pending); // Release borrow
+                                if pending_value != current_pos {
+                                    self.move_stepper_absolute_with_source("UI", x_idx, pending_value);
                                 }
-                                // If has_focus is true, don't sync - let user edit freely
-                                
+                                self.pending_positions.remove(&x_idx);
+                            } else if !has_focus {
+                                // Only sync when widget doesn't have focus AND pending doesn't match current
+                                // This prevents overwriting user edits while they're typing
+                                if *pending != current_pos {
+                                    *pending = current_pos;
+                                }
+                            }
+                            // If has_focus is true, don't sync - let user edit freely
+                            
+                            // Read-only horizontal slider for visualization (optional, only if x_max_pos is set)
+                            if self.x_max_pos.is_some() {
                                 // Allocate wider space for slider (default slider width + 50 pixels: 30 + 20)
                                 // Use egui's default slider width, not available_width (which scales with window)
                                 let default_slider_width = ui.spacing().slider_width;
@@ -1079,9 +1114,6 @@ impl eframe::App for StepperGUI {
                                 
                                 // Skip adding the actual slider widget - we've drawn a custom one
                                 // The allocated space above provides the layout
-                            } else {
-                                // No X_MAX_POS configured - show position without slider
-                                ui.label(format!("Position: {}", pos));
                             }
                         });
                         
@@ -1101,11 +1133,17 @@ impl eframe::App for StepperGUI {
                             ui.add_space(30.0); // Indent to align with above row
                             let min_response = ui.add(egui::DragValue::new(&mut self.x_min).speed(10.0).prefix("Min: "));
                             if min_response.changed() {
-                                self.set_min(0, self.x_min);
+                                // X stepper (gantry) uses axis index 1 in Arduino minmax array
+                                self.set_min(1, self.x_min);
                             }
                             let max_response = ui.add(egui::DragValue::new(&mut self.x_max).speed(10.0).prefix("Max: "));
                             if max_response.changed() {
-                                self.set_max(0, self.x_max);
+                                // X stepper (gantry) uses axis index 1 in Arduino minmax array
+                                self.set_max(1, self.x_max);
+                            }
+                            let step_response = ui.add(egui::DragValue::new(&mut self.x_step).speed(1.0).clamp_range(1..=1000).prefix("Step: "));
+                            if step_response.changed() {
+                                // x_step is just stored, no command needed
                             }
                         });
                         ui.separator();
@@ -1387,6 +1425,13 @@ impl eframe::App for StepperGUI {
                         
                         ui.label("Tuner positions:");
                         ui.horizontal(|ui| {
+                            ui.label("Tuner Step:");
+                            let step_response = ui.add(egui::DragValue::new(&mut self.tuner_step).speed(10.0).clamp_range(1..=10000));
+                            if step_response.changed() {
+                                // tuner_step is just stored, no command needed
+                            }
+                        });
+                        ui.horizontal(|ui| {
                             for tuner_idx in 0..num_tuners {
                                 ui.vertical(|ui| {
                                     ui.label(format!("Tuner {}", tuner_idx));
@@ -1428,16 +1473,57 @@ impl eframe::App for StepperGUI {
                                         (2.0, channel_color)
                                     );
                                     
-                                    // Display position value
-                                    ui.label(format!("{}", tuner_pos));
+                                    // Editable number box for absolute position
+                                    // Use key scheme: 10000 + tuner_idx for separate board, main_idx for main board
+                                    let pending_key = if self.tuner_port.is_some() {
+                                        10000 + tuner_idx
+                                    } else if let Some(tuner_first) = self.tuner_first_index {
+                                        tuner_first + tuner_idx
+                                    } else {
+                                        10000 + tuner_idx // fallback
+                                    };
+                                    
+                                    let current_pos = tuner_pos;
+                                    let pending = self.pending_positions.entry(pending_key).or_insert(current_pos);
+                                    
+                                    // Determine tuner range for clamping
+                                    let (tuner_min, tuner_max) = if self.tuner_port.is_some() {
+                                        (-100000, 100000) // Separate tuner board
+                                    } else {
+                                        (-25000, 25000)  // Main board
+                                    };
+                                    
+                                    let response = ui.add(egui::DragValue::new(pending)
+                                        .clamp_range(tuner_min..=tuner_max)
+                                        .speed(100.0));
+                                    
+                                    let has_focus = response.has_focus();
+                                    let lost_focus = response.lost_focus();
+                                    let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                    
+                                    // Only send command when Enter is pressed (lost focus + Enter key)
+                                    if lost_focus && enter_pressed {
+                                        let pending_value = *pending;
+                                        let _ = pending; // Release borrow
+                                        if pending_value != current_pos {
+                                            let clamped = pending_value.clamp(tuner_min, tuner_max);
+                                            self.move_tuner_absolute(tuner_idx, clamped);
+                                        }
+                                        self.pending_positions.insert(pending_key, pending_value);
+                                    } else {
+                                        // Only sync pending value if user is NOT editing (widget not focused)
+                                        if !has_focus && *pending != current_pos {
+                                            *pending = current_pos;
+                                        }
+                                    }
                                     
                                     // Control buttons
                                     ui.horizontal(|ui| {
                                         if ui.button("-").clicked() {
-                                            self.move_tuner(tuner_idx, -10);
+                                            self.move_tuner(tuner_idx, -self.tuner_step);
                                         }
                                         if ui.button("+").clicked() {
-                                            self.move_tuner(tuner_idx, 10);
+                                            self.move_tuner(tuner_idx, self.tuner_step);
                                         }
                                     });
                                 });
@@ -1531,6 +1617,7 @@ fn main() {
     };
     let z_up_step = ops_settings.z_up_step.unwrap_or(2);
     let z_down_step = ops_settings.z_down_step.unwrap_or(-2);
+    let x_step = ops_settings.x_step.unwrap_or(10);
 
     let mainboard_tuner_count = config_loader::mainboard_tuner_indices(&settings).len();
     let tuner_num_for_gui = if settings.ard_t_num_steppers.is_some() {
@@ -1555,7 +1642,8 @@ fn main() {
         z_up_step,
         z_down_step,
         settings.firmware,
-        x_slider_max // Use GPIO_MAX_STEPS for slider range
+        x_slider_max, // Use GPIO_MAX_STEPS for slider range
+        x_step
     );
     
     // Auto-connect on startup (mirror Python's automatic arduino_init)
