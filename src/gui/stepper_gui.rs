@@ -1178,15 +1178,16 @@ impl eframe::App for StepperGUI {
                 }
                 
                 // ========== X-AXIS SECTION ==========
+                // Only show X-axis if x_step_index is set AND x_max_pos is set and > 0 (not a dummy)
                 if let Some(x_idx) = self.x_step_index {
-                    if x_idx < self.positions.len() {
-                        ui.label(&format!("X-axis (Stepper {}):", x_idx));
-                        
-                        // Slider full width of window
-                        if self.x_max_pos.is_some() {
+                    if let Some(max_pos) = self.x_max_pos {
+                        if max_pos > 0 && x_idx < self.positions.len() {
+                            ui.label(&format!("X-axis (Stepper {}):", x_idx));
+                            
+                            // Slider full width of window
                             let mut pos = self.positions[x_idx];
                             let display_pos = pos.max(0);
-                            let max_range = self.x_max_pos.unwrap_or(2600);
+                            let max_range = max_pos;
                             
                             // Allocate full available width for slider
                             let available_width = ui.available_width();
@@ -1224,76 +1225,75 @@ impl eframe::App for StepperGUI {
                                 6.0,
                                 egui::Color32::WHITE
                             );
+                            
+                            // Row with - numberbox +
+                            ui.horizontal(|ui| {
+                                if ui.button("-").clicked() {
+                                    self.move_stepper(x_idx, -self.x_step);
+                                }
+                                
+                                let current_pos = self.positions[x_idx];
+                                let pending = self.pending_positions.entry(x_idx).or_insert_with(|| current_pos);
+                                let response = ui.add(egui::DragValue::new(pending)
+                                    .clamp_range(-100..=max_range)
+                                    .speed(10.0));
+                                
+                                let has_focus = response.has_focus();
+                                let lost_focus = response.lost_focus();
+                                let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                
+                                if lost_focus && enter_pressed {
+                                    let pending_value = *pending;
+                                    drop(pending);
+                                    if pending_value != current_pos {
+                                        self.move_stepper_absolute_with_source("UI", x_idx, pending_value);
+                                    }
+                                    self.pending_positions.remove(&x_idx);
+                                } else if !has_focus {
+                                    if *pending != current_pos {
+                                        *pending = current_pos;
+                                    }
+                                }
+                                
+                                if ui.button("+").clicked() {
+                                    self.move_stepper(x_idx, self.x_step);
+                                }
+                            });
+                            
+                            // X stepper parameter controls
+                            ui.horizontal(|ui| {
+                                ui.label("Accel:");
+                                let accel_response = ui.add(egui::DragValue::new(&mut self.x_accel).speed(100.0));
+                                if accel_response.changed() {
+                                    self.set_accel(x_idx, self.x_accel);
+                                }
+                                ui.label("Speed:");
+                                let speed_response = ui.add(egui::DragValue::new(&mut self.x_speed).speed(10.0));
+                                if speed_response.changed() {
+                                    self.set_speed(x_idx, self.x_speed);
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Min:");
+                                let min_response = ui.add(egui::DragValue::new(&mut self.x_min).speed(10.0));
+                                if min_response.changed() {
+                                    self.set_min(0, self.x_min);
+                                }
+                                ui.label("Max:");
+                                let max_response = ui.add(egui::DragValue::new(&mut self.x_max).speed(10.0));
+                                if max_response.changed() {
+                                    self.set_max(0, self.x_max);
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("X Step:");
+                                let step_response = ui.add(egui::DragValue::new(&mut self.x_step).speed(1.0).clamp_range(1..=1000));
+                                if step_response.changed() {
+                                    // x_step is just stored, no command needed
+                                }
+                            });
+                            ui.separator();
                         }
-                        
-                        // Row with - numberbox +
-                        ui.horizontal(|ui| {
-                            if ui.button("-").clicked() {
-                                self.move_stepper(x_idx, -self.x_step);
-                            }
-                            
-                            let max_range = self.x_max_pos.unwrap_or(2600);
-                            let current_pos = self.positions[x_idx];
-                            let pending = self.pending_positions.entry(x_idx).or_insert_with(|| current_pos);
-                            let response = ui.add(egui::DragValue::new(pending)
-                                .clamp_range(-100..=max_range)
-                                .speed(10.0));
-                            
-                            let has_focus = response.has_focus();
-                            let lost_focus = response.lost_focus();
-                            let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            
-                            if lost_focus && enter_pressed {
-                                let pending_value = *pending;
-                                drop(pending);
-                                if pending_value != current_pos {
-                                    self.move_stepper_absolute_with_source("UI", x_idx, pending_value);
-                                }
-                                self.pending_positions.remove(&x_idx);
-                            } else if !has_focus {
-                                if *pending != current_pos {
-                                    *pending = current_pos;
-                                }
-                            }
-                            
-                            if ui.button("+").clicked() {
-                                self.move_stepper(x_idx, self.x_step);
-                            }
-                        });
-                        
-                        // X stepper parameter controls
-                        ui.horizontal(|ui| {
-                            ui.label("Accel:");
-                            let accel_response = ui.add(egui::DragValue::new(&mut self.x_accel).speed(100.0));
-                            if accel_response.changed() {
-                                self.set_accel(x_idx, self.x_accel);
-                            }
-                            ui.label("Speed:");
-                            let speed_response = ui.add(egui::DragValue::new(&mut self.x_speed).speed(10.0));
-                            if speed_response.changed() {
-                                self.set_speed(x_idx, self.x_speed);
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Min:");
-                            let min_response = ui.add(egui::DragValue::new(&mut self.x_min).speed(10.0));
-                            if min_response.changed() {
-                                self.set_min(0, self.x_min);
-                            }
-                            ui.label("Max:");
-                            let max_response = ui.add(egui::DragValue::new(&mut self.x_max).speed(10.0));
-                            if max_response.changed() {
-                                self.set_max(0, self.x_max);
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("X Step:");
-                            let step_response = ui.add(egui::DragValue::new(&mut self.x_step).speed(1.0).clamp_range(1..=1000));
-                            if step_response.changed() {
-                                // x_step is just stored, no command needed
-                            }
-                        });
-                        ui.separator();
                     }
                 }
                 

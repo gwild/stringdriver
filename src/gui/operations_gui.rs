@@ -786,14 +786,14 @@ impl OperationsGUI {
                             ops_guard.set_x_step(x_step);
                         }
                         ops_guard.right_left_move(
-                            &mut *stepper_client,
-                            &mut local_positions,
-                            &max_positions,
-                            &min_thresholds,
-                            &max_thresholds,
-                            &min_voices,
-                            &max_voices,
-                            Some(&exit_flag),
+                        &mut *stepper_client,
+                        &mut local_positions,
+                        &max_positions,
+                        &min_thresholds,
+                        &max_thresholds,
+                        &min_voices,
+                        &max_voices,
+                        Some(&exit_flag),
                         )
                     },
                     "left_right_move" => {
@@ -802,14 +802,14 @@ impl OperationsGUI {
                             ops_guard.set_x_step(x_step);
                         }
                         ops_guard.left_right_move(
-                            &mut *stepper_client,
-                            &mut local_positions,
-                            &max_positions,
-                            &min_thresholds,
-                            &max_thresholds,
-                            &min_voices,
-                            &max_voices,
-                            Some(&exit_flag),
+                        &mut *stepper_client,
+                        &mut local_positions,
+                        &max_positions,
+                        &min_thresholds,
+                        &max_thresholds,
+                        &min_voices,
+                        &max_voices,
+                        Some(&exit_flag),
                         )
                     },
                     "x_home" => ops_guard.x_home(
@@ -1019,7 +1019,26 @@ impl eframe::App for OperationsGUI {
                 ui.label("When off, bump_check commands just report pass");
             });
             
+            // Row 1: X Start, X Finish, Adjustment Level
             ui.horizontal(|ui| {
+                ui.label("X Start:");
+                let mut x_start = self.operations.read().unwrap().get_x_start();
+                let mut drag = egui::DragValue::new(&mut x_start);
+                drag = drag.clamp_range(-10000..=10000);
+                if ui.add(drag).changed() {
+                    self.operations.read().unwrap().set_x_start(x_start);
+                    self.append_message(&format!("X start set to {}", x_start));
+                }
+                
+                ui.label("X Finish:");
+                let mut x_finish = self.operations.read().unwrap().get_x_finish();
+                let mut drag = egui::DragValue::new(&mut x_finish);
+                drag = drag.clamp_range(-10000..=10000);
+                if ui.add(drag).changed() {
+                    self.operations.read().unwrap().set_x_finish(x_finish);
+                    self.append_message(&format!("X finish set to {}", x_finish));
+                }
+                
                 ui.label("Adjustment Level:");
                 let mut adjustment_level = self.operations.read().unwrap().get_adjustment_level();
                 let mut drag = egui::DragValue::new(&mut adjustment_level);
@@ -1030,6 +1049,7 @@ impl eframe::App for OperationsGUI {
                 }
             });
             
+            // Row 2: Retry Threshold, Delta Threshold, Z Variance Threshold
             ui.horizontal(|ui| {
                 ui.label("Retry Threshold:");
                 let mut retry_threshold = self.operations.read().unwrap().get_retry_threshold();
@@ -1039,9 +1059,7 @@ impl eframe::App for OperationsGUI {
                     self.operations.read().unwrap().set_retry_threshold(retry_threshold);
                     self.append_message(&format!("Retry threshold set to {}", retry_threshold));
                 }
-            });
-            
-            ui.horizontal(|ui| {
+                
                 ui.label("Delta Threshold:");
                 let mut delta_threshold = self.operations.read().unwrap().get_delta_threshold();
                 let mut drag = egui::DragValue::new(&mut delta_threshold);
@@ -1050,9 +1068,7 @@ impl eframe::App for OperationsGUI {
                     self.operations.read().unwrap().set_delta_threshold(delta_threshold);
                     self.append_message(&format!("Delta threshold set to {}", delta_threshold));
                 }
-            });
-            
-            ui.horizontal(|ui| {
+                
                 ui.label("Z Variance Threshold:");
                 let mut z_variance_threshold = self.operations.read().unwrap().get_z_variance_threshold();
                 let mut drag = egui::DragValue::new(&mut z_variance_threshold);
@@ -1063,33 +1079,12 @@ impl eframe::App for OperationsGUI {
                 }
             });
             
-            ui.horizontal(|ui| {
-                ui.label("X Start:");
-                let mut x_start = self.operations.read().unwrap().get_x_start();
-                let mut drag = egui::DragValue::new(&mut x_start);
-                drag = drag.clamp_range(-10000..=10000);
-                if ui.add(drag).changed() {
-                    self.operations.read().unwrap().set_x_start(x_start);
-                    self.append_message(&format!("X start set to {}", x_start));
-                }
-            });
-            
-            ui.horizontal(|ui| {
-                ui.label("X Finish:");
-                let mut x_finish = self.operations.read().unwrap().get_x_finish();
-                let mut drag = egui::DragValue::new(&mut x_finish);
-                drag = drag.clamp_range(-10000..=10000);
-                if ui.add(drag).changed() {
-                    self.operations.read().unwrap().set_x_finish(x_finish);
-                    self.append_message(&format!("X finish set to {}", x_finish));
-                }
-            });
-            
             ui.separator();
             
             // Rest timing values
-            ui.heading("Timing (Rest Values)");
+            ui.heading("Timing");
             
+            // Row: Tune Rest, X Rest, Lap Rest
             ui.horizontal(|ui| {
                 ui.label("Tune Rest:");
                 let mut tune_rest = self.operations.read().unwrap().get_tune_rest();
@@ -1099,9 +1094,7 @@ impl eframe::App for OperationsGUI {
                     self.operations.read().unwrap().set_tune_rest(tune_rest);
                     self.append_message(&format!("Tune rest set to {:.2}", tune_rest));
                 }
-            });
-            
-            ui.horizontal(|ui| {
+                
                 ui.label("X Rest:");
                 let mut x_rest = self.operations.read().unwrap().get_x_rest();
                 let mut drag = egui::DragValue::new(&mut x_rest).speed(0.1);
@@ -1109,6 +1102,15 @@ impl eframe::App for OperationsGUI {
                 if ui.add(drag).changed() {
                     self.operations.read().unwrap().set_x_rest(x_rest);
                     self.append_message(&format!("X rest set to {:.2}", x_rest));
+                }
+                
+                ui.label("Lap Rest:");
+                let mut lap_rest = self.operations.read().unwrap().get_lap_rest();
+                let mut drag = egui::DragValue::new(&mut lap_rest).speed(0.1);
+                drag = drag.clamp_range(0.0..=100.0);
+                if ui.add(drag).changed() {
+                    self.operations.read().unwrap().set_lap_rest(lap_rest);
+                    self.append_message(&format!("Lap rest set to {:.2}", lap_rest));
                 }
             });
             
@@ -1120,17 +1122,6 @@ impl eframe::App for OperationsGUI {
                 if ui.add(drag).changed() {
                     self.operations.read().unwrap().set_z_rest(z_rest);
                     self.append_message(&format!("Z rest set to {:.2}", z_rest));
-                }
-            });
-            
-            ui.horizontal(|ui| {
-                ui.label("Lap Rest:");
-                let mut lap_rest = self.operations.read().unwrap().get_lap_rest();
-                let mut drag = egui::DragValue::new(&mut lap_rest).speed(0.1);
-                drag = drag.clamp_range(0.0..=100.0);
-                if ui.add(drag).changed() {
-                    self.operations.read().unwrap().set_lap_rest(lap_rest);
-                    self.append_message(&format!("Lap rest set to {:.2}", lap_rest));
                 }
             });
             
