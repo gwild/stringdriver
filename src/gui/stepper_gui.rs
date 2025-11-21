@@ -253,6 +253,20 @@ impl StepperGUI {
                     }
                 }
             }
+            "get_x_step" => {
+                if let Some(ref mut resp) = responder {
+                    use std::io::Write;
+                    let _ = resp.write_all(format!("{}\n", self.x_step).as_bytes());
+                    let _ = resp.flush();
+                }
+            }
+            "get_x_step" => {
+                if let Some(stream) = responder.as_deref_mut() {
+                    use std::io::Write;
+                    let _ = stream.write_all(format!("{}\n", self.x_step).as_bytes());
+                    let _ = stream.flush();
+                }
+            }
             "get_positions" => {
                 if let Some(stream) = responder.as_deref_mut() {
                     if let Err(e) = Self::write_positions_response(stream, &self.positions) {
@@ -458,14 +472,6 @@ impl StepperGUI {
                 self.connected = true;
                 self.log("Connected. Requesting positions...");
                 self.refresh_positions();
-                // Initialize X stepper min/max if X stepper exists
-                if self.x_step_index.is_some() {
-                    self.log(&format!("Initializing X stepper min/max: min={}, max={}", self.x_min, self.x_max));
-                    self.set_min(1, self.x_min); // X stepper (gantry) uses axis index 1
-                    thread::sleep(Duration::from_millis(100));
-                    self.set_max(1, self.x_max); // X stepper (gantry) uses axis index 1
-                    thread::sleep(Duration::from_millis(100));
-                }
             }
             Err(e) => {
                 self.log(&format!("Connection failed: {}", e));
@@ -1028,45 +1034,15 @@ impl eframe::App for StepperGUI {
                 // Always show slider regardless of position value (clamp display to 0 minimum)
                 if let Some(x_idx) = self.x_step_index {
                     if x_idx < self.positions.len() {
-                        ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
                             ui.label(&format!("X-axis (Stepper {}):", x_idx));
-                            let mut pos = self.positions[x_idx];
-                            // Clamp position for display (min 0) but keep actual value for editing
-                            let display_pos = pos.max(0);
-                            // Use X_MAX_POS from config, or default to 2600 if not set
-                            let max_range = self.x_max_pos.unwrap_or(2600);
                             
-                            // Editable number box - always shown
-                            let current_pos = self.positions[x_idx];
-                            let pending = self.pending_positions.entry(x_idx).or_insert_with(|| current_pos);
-                            let response = ui.add(egui::DragValue::new(pending)
-                                .clamp_range(-100..=max_range)
-                                .speed(10.0));
-                            
-                            let has_focus = response.has_focus();
-                            let lost_focus = response.lost_focus();
-                            let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            
-                            // Only send command when Enter is pressed (lost focus + Enter key)
-                            // Use absolute move for X stepper
-                            if lost_focus && enter_pressed {
-                                let pending_value = *pending;
-                                drop(pending); // Release borrow
-                                if pending_value != current_pos {
-                                    self.move_stepper_absolute_with_source("UI", x_idx, pending_value);
-                                }
-                                self.pending_positions.remove(&x_idx);
-                            } else if !has_focus {
-                                // Only sync when widget doesn't have focus AND pending doesn't match current
-                                // This prevents overwriting user edits while they're typing
-                                if *pending != current_pos {
-                                    *pending = current_pos;
-                                }
-                            }
-                            // If has_focus is true, don't sync - let user edit freely
-                            
-                            // Read-only horizontal slider for visualization (optional, only if x_max_pos is set)
+                            // Slider in its own row above - numberbox +
                             if self.x_max_pos.is_some() {
+                                let mut pos = self.positions[x_idx];
+                                let display_pos = pos.max(0);
+                                let max_range = self.x_max_pos.unwrap_or(2600);
+                                
                                 // Allocate wider space for slider (default slider width + 50 pixels: 30 + 20)
                                 // Use egui's default slider width, not available_width (which scales with window)
                                 let default_slider_width = ui.spacing().slider_width;
@@ -1115,6 +1091,51 @@ impl eframe::App for StepperGUI {
                                 // Skip adding the actual slider widget - we've drawn a custom one
                                 // The allocated space above provides the layout
                             }
+                            
+                            // Row with - numberbox +
+                            ui.horizontal(|ui| {
+                                // Dec (-) button
+                                if ui.button("-").clicked() {
+                                    self.move_stepper(x_idx, -self.x_step);
+                                }
+                                
+                                // Editable number box
+                                let mut pos = self.positions[x_idx];
+                                let display_pos = pos.max(0);
+                                let max_range = self.x_max_pos.unwrap_or(2600);
+                                let current_pos = self.positions[x_idx];
+                                let pending = self.pending_positions.entry(x_idx).or_insert_with(|| current_pos);
+                                let response = ui.add(egui::DragValue::new(pending)
+                                    .clamp_range(-100..=max_range)
+                                    .speed(10.0));
+                                
+                                let has_focus = response.has_focus();
+                                let lost_focus = response.lost_focus();
+                                let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                
+                                // Only send command when Enter is pressed (lost focus + Enter key)
+                                // Use absolute move for X stepper
+                                if lost_focus && enter_pressed {
+                                    let pending_value = *pending;
+                                    drop(pending); // Release borrow
+                                    if pending_value != current_pos {
+                                        self.move_stepper_absolute_with_source("UI", x_idx, pending_value);
+                                    }
+                                    self.pending_positions.remove(&x_idx);
+                                } else if !has_focus {
+                                    // Only sync when widget doesn't have focus AND pending doesn't match current
+                                    // This prevents overwriting user edits while they're typing
+                                    if *pending != current_pos {
+                                        *pending = current_pos;
+                                    }
+                                }
+                                // If has_focus is true, don't sync - let user edit freely
+                                
+                                // Inc (+) button
+                                if ui.button("+").clicked() {
+                                    self.move_stepper(x_idx, self.x_step);
+                                }
+                            });
                         });
                         
                         // X stepper parameter controls in narrow rows
@@ -1133,13 +1154,11 @@ impl eframe::App for StepperGUI {
                             ui.add_space(30.0); // Indent to align with above row
                             let min_response = ui.add(egui::DragValue::new(&mut self.x_min).speed(10.0).prefix("Min: "));
                             if min_response.changed() {
-                                // X stepper (gantry) uses axis index 1 in Arduino minmax array
-                                self.set_min(1, self.x_min);
+                                self.set_min(0, self.x_min);
                             }
                             let max_response = ui.add(egui::DragValue::new(&mut self.x_max).speed(10.0).prefix("Max: "));
                             if max_response.changed() {
-                                // X stepper (gantry) uses axis index 1 in Arduino minmax array
-                                self.set_max(1, self.x_max);
+                                self.set_max(0, self.x_max);
                             }
                             let step_response = ui.add(egui::DragValue::new(&mut self.x_step).speed(1.0).clamp_range(1..=1000).prefix("Step: "));
                             if step_response.changed() {

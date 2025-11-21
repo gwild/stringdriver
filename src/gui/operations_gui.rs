@@ -119,6 +119,31 @@ impl ArduinoStepperOps {
         Ok(vec![])
     }
 
+    fn fetch_x_step_from_socket(socket_path: &str) -> Result<i32> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+
+        let mut stream = UnixStream::connect(socket_path)
+            .map_err(|e| anyhow::anyhow!("Failed to connect to stepper_gui socket at {}: {}", socket_path, e))?;
+        stream
+            .write_all(b"get_x_step\n")
+            .map_err(|e| anyhow::anyhow!("Failed to request x_step: {}", e))?;
+        stream
+            .flush()
+            .map_err(|e| anyhow::anyhow!("Failed to flush x_step request: {}", e))?;
+
+        let mut reader = BufReader::new(stream);
+        let mut response = String::new();
+        let bytes = reader
+            .read_line(&mut response)
+            .map_err(|e| anyhow::anyhow!("Failed to read x_step response: {}", e))?;
+        if bytes == 0 {
+            return Err(anyhow::anyhow!("Stepper GUI closed socket without replying"));
+        }
+        response.trim().parse::<i32>()
+            .map_err(|e| anyhow::anyhow!("Failed to parse x_step response '{}': {}", response.trim(), e))
+    }
+
     fn fetch_positions_from_socket(socket_path: &str) -> Result<Vec<i32>> {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixStream;
@@ -722,6 +747,8 @@ impl OperationsGUI {
                         return;
                     }
                 };
+                // Get socket_path for x_step sync
+                let socket_path = stepper_client.socket_path();
                 let ops_guard = match operations.read() {
                     Ok(guard) => guard,
                     Err(_) => {
@@ -753,26 +780,38 @@ impl OperationsGUI {
                         &mut *stepper_client,
                         Some(&exit_flag),
                     ),
-                    "right_left_move" => ops_guard.right_left_move(
-                        &mut *stepper_client,
-                        &mut local_positions,
-                        &max_positions,
-                        &min_thresholds,
-                        &max_thresholds,
-                        &min_voices,
-                        &max_voices,
-                        Some(&exit_flag),
-                    ),
-                    "left_right_move" => ops_guard.left_right_move(
-                        &mut *stepper_client,
-                        &mut local_positions,
-                        &max_positions,
-                        &min_thresholds,
-                        &max_thresholds,
-                        &min_voices,
-                        &max_voices,
-                        Some(&exit_flag),
-                    ),
+                    "right_left_move" => {
+                        // Sync x_step from stepper_gui before operation
+                        if let Ok(x_step) = ArduinoStepperOps::fetch_x_step_from_socket(&socket_path) {
+                            ops_guard.set_x_step(x_step);
+                        }
+                        ops_guard.right_left_move(
+                            &mut *stepper_client,
+                            &mut local_positions,
+                            &max_positions,
+                            &min_thresholds,
+                            &max_thresholds,
+                            &min_voices,
+                            &max_voices,
+                            Some(&exit_flag),
+                        )
+                    },
+                    "left_right_move" => {
+                        // Sync x_step from stepper_gui before operation
+                        if let Ok(x_step) = ArduinoStepperOps::fetch_x_step_from_socket(&socket_path) {
+                            ops_guard.set_x_step(x_step);
+                        }
+                        ops_guard.left_right_move(
+                            &mut *stepper_client,
+                            &mut local_positions,
+                            &max_positions,
+                            &min_thresholds,
+                            &max_thresholds,
+                            &min_voices,
+                            &max_voices,
+                            Some(&exit_flag),
+                        )
+                    },
                     "x_home" => ops_guard.x_home(
                         &mut *stepper_client,
                         &mut local_positions,
@@ -1043,17 +1082,6 @@ impl eframe::App for OperationsGUI {
                 if ui.add(drag).changed() {
                     self.operations.read().unwrap().set_x_finish(x_finish);
                     self.append_message(&format!("X finish set to {}", x_finish));
-                }
-            });
-            
-            ui.horizontal(|ui| {
-                ui.label("X Step:");
-                let mut x_step = self.operations.read().unwrap().get_x_step();
-                let mut drag = egui::DragValue::new(&mut x_step);
-                drag = drag.clamp_range(1..=1000);
-                if ui.add(drag).changed() {
-                    self.operations.read().unwrap().set_x_step(x_step);
-                    self.append_message(&format!("X step set to {}", x_step));
                 }
             });
             
