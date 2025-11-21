@@ -1033,141 +1033,262 @@ impl eframe::App for StepperGUI {
             let x_offset = 0.0; // Feature disabled
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                // Layout steppers in pairs matching physical system:
-                // (2,1), (4,3), (6,5), (8,7), (10,9), (12,11)
-                // Stepper 0 is x-axis carriage (if present)
-                
-                // Show X stepper separately if it exists and is valid
-                // Always show slider regardless of position value (clamp display to 0 minimum)
-                if let Some(x_idx) = self.x_step_index {
-                    if x_idx < self.positions.len() {
-                        ui.vertical(|ui| {
-                            ui.label(&format!("X-axis (Stepper {}):", x_idx));
-                            
-                            // Slider in its own row above - numberbox +
-                            if self.x_max_pos.is_some() {
-                                let mut pos = self.positions[x_idx];
-                                let display_pos = pos.max(0);
-                                let max_range = self.x_max_pos.unwrap_or(2600);
-                                
-                                // Allocate wider space for slider (default slider width + 50 pixels: 30 + 20)
-                                // Use egui's default slider width, not available_width (which scales with window)
-                                let default_slider_width = ui.spacing().slider_width;
-                                let slider_width = default_slider_width + 50.0;
-                                let slider_height = ui.spacing().interact_size.y;
-                                
-                                // Allocate space for the slider
-                                let slider_response = ui.allocate_response(
-                                    egui::vec2(slider_width, slider_height),
-                                    egui::Sense::hover()
-                                );
-                                
-                                // Draw custom slider with white indicator
-                                let slider_rect = slider_response.rect;
-                                let painter = ui.painter();
-                                
-                                // Draw slider track background
-                                let track_height = 4.0;
-                                let track_rect = egui::Rect::from_center_size(
-                                    slider_rect.center(),
-                                    egui::vec2(slider_rect.width(), track_height)
-                                );
-                                painter.rect_filled(track_rect, 2.0, egui::Color32::from_gray(60));
-                                
-                                // Calculate normalized position (0.0 to 1.0) using clamped display position
-                                let normalized_pos = (display_pos as f32 + 100.0) / (max_range as f32 + 100.0);
-                                let normalized_pos = normalized_pos.clamp(0.0, 1.0);
-                                
-                                // Draw filled portion (position indicator)
-                                let fill_width = slider_rect.width() * normalized_pos;
-                                let fill_rect = egui::Rect::from_min_size(
-                                    slider_rect.min,
-                                    egui::vec2(fill_width, track_height)
-                                );
-                                painter.rect_filled(fill_rect, 2.0, egui::Color32::from_gray(120));
-                                
-                                // Draw white indicator circle
-                                let indicator_x = slider_rect.min.x + fill_width;
-                                let indicator_y = slider_rect.center().y;
-                                painter.circle_filled(
-                                    egui::pos2(indicator_x, indicator_y),
-                                    6.0,
-                                    egui::Color32::WHITE
-                                );
-                                
-                                // Skip adding the actual slider widget - we've drawn a custom one
-                                // The allocated space above provides the layout
+                // ========== TUNERS SECTION ==========
+                if self.tuner_first_index.is_some() {
+                    if let Some(num_tuners) = self.tuner_num_steppers {
+                        ui.label("Tuners");
+                        ui.horizontal(|ui| {
+                            for tuner_idx in 0..num_tuners {
+                                ui.vertical(|ui| {
+                                    ui.label(format!("Tuner {}", tuner_idx));
+                                    let channel_color = channel_colors[tuner_idx % channel_colors.len()];
+                                    
+                                    // Get tuner position
+                                    let tuner_pos = if tuner_idx < self.tuner_positions.len() {
+                                        self.tuner_positions[tuner_idx]
+                                    } else {
+                                        0
+                                    };
+                                    
+                                    // Rotary dial visualization
+                                    let desired_size = egui::vec2(60.0, 60.0);
+                                    let response = ui.allocate_response(desired_size, egui::Sense::hover());
+                                    let rect = response.rect;
+                                    let painter = ui.painter();
+                                    
+                                    let radius = rect.width() / 2.0 - 2.0;
+                                    painter.circle_filled(rect.center(), radius, egui::Color32::from_rgb(40, 40, 40));
+                                    painter.circle_stroke(rect.center(), radius, egui::Stroke::new(2.0, channel_color));
+                                    
+                                    let tuner_range = if self.tuner_port.is_some() {
+                                        200000.0
+                                    } else {
+                                        50000.0
+                                    };
+                                    let normalized = ((tuner_pos as f32 + tuner_range / 2.0) / tuner_range).clamp(0.0, 1.0);
+                                    let angle = normalized * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                                    let radius = rect.width() / 2.0 - 5.0;
+                                    let end_x = rect.center().x + angle.cos() * radius;
+                                    let end_y = rect.center().y - angle.sin() * radius;
+                                    painter.line_segment(
+                                        [rect.center(), egui::pos2(end_x, end_y)],
+                                        (2.0, channel_color)
+                                    );
+                                    
+                                    // + button
+                                    if ui.button("+").clicked() {
+                                        self.move_tuner(tuner_idx, self.tuner_step);
+                                    }
+                                    
+                                    // Editable number box
+                                    let pending_key = if self.tuner_port.is_some() {
+                                        10000 + tuner_idx
+                                    } else if let Some(tuner_first) = self.tuner_first_index {
+                                        tuner_first + tuner_idx
+                                    } else {
+                                        10000 + tuner_idx
+                                    };
+                                    
+                                    let current_pos = tuner_pos;
+                                    let pending = self.pending_positions.entry(pending_key).or_insert(current_pos);
+                                    
+                                    let (tuner_min, tuner_max) = if self.tuner_port.is_some() {
+                                        (-100000, 100000)
+                                    } else {
+                                        (-25000, 25000)
+                                    };
+                                    
+                                    let response = ui.add(egui::DragValue::new(pending)
+                                        .clamp_range(tuner_min..=tuner_max)
+                                        .speed(100.0));
+                                    
+                                    let has_focus = response.has_focus();
+                                    let lost_focus = response.lost_focus();
+                                    let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                    
+                                    if lost_focus && enter_pressed {
+                                        let pending_value = *pending;
+                                        let _ = pending;
+                                        if pending_value != current_pos {
+                                            let clamped = pending_value.clamp(tuner_min, tuner_max);
+                                            self.move_tuner_absolute(tuner_idx, clamped);
+                                        }
+                                        self.pending_positions.insert(pending_key, pending_value);
+                                    } else {
+                                        if !has_focus && *pending != current_pos {
+                                            *pending = current_pos;
+                                        }
+                                    }
+                                    
+                                    // - button
+                                    if ui.button("-").clicked() {
+                                        self.move_tuner(tuner_idx, -self.tuner_step);
+                                    }
+                                });
+                                ui.add_space(10.0);
                             }
-                            
-                            // Row with - numberbox +
-                            ui.horizontal(|ui| {
-                                // Dec (-) button
-                                if ui.button("-").clicked() {
-                                    self.move_stepper(x_idx, -self.x_step);
-                                }
-                                
-                                // Editable number box
-                                let mut pos = self.positions[x_idx];
-                                let display_pos = pos.max(0);
-                                let max_range = self.x_max_pos.unwrap_or(2600);
-                                let current_pos = self.positions[x_idx];
-                                let pending = self.pending_positions.entry(x_idx).or_insert_with(|| current_pos);
-                                let response = ui.add(egui::DragValue::new(pending)
-                                    .clamp_range(-100..=max_range)
-                                    .speed(10.0));
-                                
-                                let has_focus = response.has_focus();
-                                let lost_focus = response.lost_focus();
-                                let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                
-                                // Only send command when Enter is pressed (lost focus + Enter key)
-                                // Use absolute move for X stepper
-                                if lost_focus && enter_pressed {
-                                    let pending_value = *pending;
-                                    drop(pending); // Release borrow
-                                    if pending_value != current_pos {
-                                        self.move_stepper_absolute_with_source("UI", x_idx, pending_value);
-                                    }
-                                    self.pending_positions.remove(&x_idx);
-                                } else if !has_focus {
-                                    // Only sync when widget doesn't have focus AND pending doesn't match current
-                                    // This prevents overwriting user edits while they're typing
-                                    if *pending != current_pos {
-                                        *pending = current_pos;
-                                    }
-                                }
-                                // If has_focus is true, don't sync - let user edit freely
-                                
-                                // Inc (+) button
-                                if ui.button("+").clicked() {
-                                    self.move_stepper(x_idx, self.x_step);
-                                }
-                            });
                         });
                         
-                        // X stepper parameter controls in narrow rows
+                        // Shared tuner controls
                         ui.horizontal(|ui| {
-                            ui.label("X:");
-                            let accel_response = ui.add(egui::DragValue::new(&mut self.x_accel).speed(100.0).prefix("Accel: "));
+                            ui.label("Accel:");
+                            let accel_response = ui.add(egui::DragValue::new(&mut self.tuner_accel).speed(100.0));
+                            if accel_response.changed() {
+                                for tuner_idx in 0..num_tuners {
+                                    self.set_tuner_accel(tuner_idx, self.tuner_accel);
+                                    thread::sleep(Duration::from_millis(10));
+                                }
+                            }
+                            ui.label("Speed:");
+                            let speed_response = ui.add(egui::DragValue::new(&mut self.tuner_speed).speed(10.0));
+                            if speed_response.changed() {
+                                for tuner_idx in 0..num_tuners {
+                                    self.set_tuner_speed(tuner_idx, self.tuner_speed);
+                                    thread::sleep(Duration::from_millis(10));
+                                }
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Min:");
+                            let min_response = ui.add(egui::DragValue::new(&mut self.tuner_min).speed(1000.0));
+                            if min_response.changed() {
+                                for tuner_idx in 0..num_tuners {
+                                    self.set_tuner_min(tuner_idx, self.tuner_min);
+                                    thread::sleep(Duration::from_millis(10));
+                                }
+                            }
+                            ui.label("Max:");
+                            let max_response = ui.add(egui::DragValue::new(&mut self.tuner_max).speed(1000.0));
+                            if max_response.changed() {
+                                for tuner_idx in 0..num_tuners {
+                                    self.set_tuner_max(tuner_idx, self.tuner_max);
+                                    thread::sleep(Duration::from_millis(10));
+                                }
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Tuner Step:");
+                            let step_response = ui.add(egui::DragValue::new(&mut self.tuner_step).speed(10.0).clamp_range(1..=10000));
+                            if step_response.changed() {
+                                // tuner_step is just stored, no command needed
+                            }
+                        });
+                        ui.separator();
+                    }
+                }
+                
+                // ========== X-AXIS SECTION ==========
+                if let Some(x_idx) = self.x_step_index {
+                    if x_idx < self.positions.len() {
+                        ui.label(&format!("X-axis (Stepper {}):", x_idx));
+                        
+                        // Slider full width of window
+                        if self.x_max_pos.is_some() {
+                            let mut pos = self.positions[x_idx];
+                            let display_pos = pos.max(0);
+                            let max_range = self.x_max_pos.unwrap_or(2600);
+                            
+                            // Allocate full available width for slider
+                            let available_width = ui.available_width();
+                            let slider_height = ui.spacing().interact_size.y;
+                            
+                            let slider_response = ui.allocate_response(
+                                egui::vec2(available_width, slider_height),
+                                egui::Sense::hover()
+                            );
+                            
+                            let slider_rect = slider_response.rect;
+                            let painter = ui.painter();
+                            
+                            let track_height = 4.0;
+                            let track_rect = egui::Rect::from_center_size(
+                                slider_rect.center(),
+                                egui::vec2(slider_rect.width(), track_height)
+                            );
+                            painter.rect_filled(track_rect, 2.0, egui::Color32::from_gray(60));
+                            
+                            let normalized_pos = (display_pos as f32 + 100.0) / (max_range as f32 + 100.0);
+                            let normalized_pos = normalized_pos.clamp(0.0, 1.0);
+                            
+                            let fill_width = slider_rect.width() * normalized_pos;
+                            let fill_rect = egui::Rect::from_min_size(
+                                slider_rect.min,
+                                egui::vec2(fill_width, track_height)
+                            );
+                            painter.rect_filled(fill_rect, 2.0, egui::Color32::from_gray(120));
+                            
+                            let indicator_x = slider_rect.min.x + fill_width;
+                            let indicator_y = slider_rect.center().y;
+                            painter.circle_filled(
+                                egui::pos2(indicator_x, indicator_y),
+                                6.0,
+                                egui::Color32::WHITE
+                            );
+                        }
+                        
+                        // Row with - numberbox +
+                        ui.horizontal(|ui| {
+                            if ui.button("-").clicked() {
+                                self.move_stepper(x_idx, -self.x_step);
+                            }
+                            
+                            let max_range = self.x_max_pos.unwrap_or(2600);
+                            let current_pos = self.positions[x_idx];
+                            let pending = self.pending_positions.entry(x_idx).or_insert_with(|| current_pos);
+                            let response = ui.add(egui::DragValue::new(pending)
+                                .clamp_range(-100..=max_range)
+                                .speed(10.0));
+                            
+                            let has_focus = response.has_focus();
+                            let lost_focus = response.lost_focus();
+                            let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            
+                            if lost_focus && enter_pressed {
+                                let pending_value = *pending;
+                                drop(pending);
+                                if pending_value != current_pos {
+                                    self.move_stepper_absolute_with_source("UI", x_idx, pending_value);
+                                }
+                                self.pending_positions.remove(&x_idx);
+                            } else if !has_focus {
+                                if *pending != current_pos {
+                                    *pending = current_pos;
+                                }
+                            }
+                            
+                            if ui.button("+").clicked() {
+                                self.move_stepper(x_idx, self.x_step);
+                            }
+                        });
+                        
+                        // X stepper parameter controls
+                        ui.horizontal(|ui| {
+                            ui.label("Accel:");
+                            let accel_response = ui.add(egui::DragValue::new(&mut self.x_accel).speed(100.0));
                             if accel_response.changed() {
                                 self.set_accel(x_idx, self.x_accel);
                             }
-                            let speed_response = ui.add(egui::DragValue::new(&mut self.x_speed).speed(10.0).prefix("Speed: "));
+                            ui.label("Speed:");
+                            let speed_response = ui.add(egui::DragValue::new(&mut self.x_speed).speed(10.0));
                             if speed_response.changed() {
                                 self.set_speed(x_idx, self.x_speed);
                             }
                         });
                         ui.horizontal(|ui| {
-                            ui.add_space(30.0); // Indent to align with above row
-                            let min_response = ui.add(egui::DragValue::new(&mut self.x_min).speed(10.0).prefix("Min: "));
+                            ui.label("Min:");
+                            let min_response = ui.add(egui::DragValue::new(&mut self.x_min).speed(10.0));
                             if min_response.changed() {
                                 self.set_min(0, self.x_min);
                             }
-                            let max_response = ui.add(egui::DragValue::new(&mut self.x_max).speed(10.0).prefix("Max: "));
+                            ui.label("Max:");
+                            let max_response = ui.add(egui::DragValue::new(&mut self.x_max).speed(10.0));
                             if max_response.changed() {
                                 self.set_max(0, self.x_max);
                             }
-                            let step_response = ui.add(egui::DragValue::new(&mut self.x_step).speed(1.0).clamp_range(1..=1000).prefix("Step: "));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("X Step:");
+                            let step_response = ui.add(egui::DragValue::new(&mut self.x_step).speed(1.0).clamp_range(1..=1000));
                             if step_response.changed() {
                                 // x_step is just stored, no command needed
                             }
@@ -1176,44 +1297,9 @@ impl eframe::App for StepperGUI {
                     }
                 }
                 
-                // Global Z stepper parameter controls in narrow rows (below x stepper, above z sliders)
-                ui.horizontal(|ui| {
-                    ui.label("Z (all):");
-                    let accel_response = ui.add(egui::DragValue::new(&mut self.z_accel).speed(100.0).prefix("Accel: "));
-                    if accel_response.changed() {
-                        self.apply_z_params_to_all();
-                    }
-                    let speed_response = ui.add(egui::DragValue::new(&mut self.z_speed).speed(10.0).prefix("Speed: "));
-                    if speed_response.changed() {
-                        self.apply_z_params_to_all();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.add_space(30.0); // Indent to align with above row
-                    let min_response = ui.add(egui::DragValue::new(&mut self.z_min).speed(10.0).prefix("Min: "));
-                    if min_response.changed() {
-                        self.apply_z_params_to_all();
-                    }
-                    let max_response = ui.add(egui::DragValue::new(&mut self.z_max).speed(10.0).prefix("Max: "));
-                    if max_response.changed() {
-                        self.apply_z_params_to_all();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.add_space(30.0); // Indent to align with above row
-                    let mut down_step = self.z_down_step;
-                    let down_response = ui.add(egui::DragValue::new(&mut down_step).speed(1.0).clamp_range(-10..=-2).prefix("Down Step: "));
-                    if down_response.changed() {
-                        self.z_down_step = down_step;
-                    }
-                    let mut up_step = self.z_up_step;
-                    let up_response = ui.add(egui::DragValue::new(&mut up_step).speed(1.0).clamp_range(2..=10).prefix("Up Step: "));
-                    if up_response.changed() {
-                        self.z_up_step = up_step;
-                    }
-                });
-                ui.separator();
-
+                // ========== Z-AXIS SECTION ==========
+                ui.label("Z-axis");
+                
                 // Arrange z-steppers in pairs using Z_FIRST_INDEX from config
                 // Only show pairs for active strings/channels (from STRING_NUM in YAML)
                 let num_pairs_to_show = self.string_num;
@@ -1400,171 +1486,56 @@ impl eframe::App for StepperGUI {
                             });
                         });
                     });
-                }
-            }
-                
-            // Display tuner steppers as rotary dials below Z steppers
-            if self.tuner_first_index.is_some() {
-                if let Some(num_tuners) = self.tuner_num_steppers {
-                        ui.separator();
-                        
-                        // Tuner parameter controls in narrow rows (above tuner dials)
-                        ui.horizontal(|ui| {
-                            ui.label("Tuners:");
-                            let accel_response = ui.add(egui::DragValue::new(&mut self.tuner_accel).speed(100.0).prefix("Accel: "));
-                            if accel_response.changed() {
-                                // Apply to all tuners
-                                for tuner_idx in 0..num_tuners {
-                                    self.set_tuner_accel(tuner_idx, self.tuner_accel);
-                                    thread::sleep(Duration::from_millis(10));
-                                }
-                            }
-                            let speed_response = ui.add(egui::DragValue::new(&mut self.tuner_speed).speed(10.0).prefix("Speed: "));
-                            if speed_response.changed() {
-                                // Apply to all tuners
-                                for tuner_idx in 0..num_tuners {
-                                    self.set_tuner_speed(tuner_idx, self.tuner_speed);
-                                    thread::sleep(Duration::from_millis(10));
-                                }
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.add_space(30.0); // Indent to align with above row
-                            let min_response = ui.add(egui::DragValue::new(&mut self.tuner_min).speed(1000.0).prefix("Min: "));
-                            if min_response.changed() {
-                                // Apply to all tuners
-                                for tuner_idx in 0..num_tuners {
-                                    self.set_tuner_min(tuner_idx, self.tuner_min);
-                                    thread::sleep(Duration::from_millis(10));
-                                }
-                            }
-                            let max_response = ui.add(egui::DragValue::new(&mut self.tuner_max).speed(1000.0).prefix("Max: "));
-                            if max_response.changed() {
-                                // Apply to all tuners
-                                for tuner_idx in 0..num_tuners {
-                                    self.set_tuner_max(tuner_idx, self.tuner_max);
-                                    thread::sleep(Duration::from_millis(10));
-                                }
-                            }
-                        });
-                        ui.separator();
-                        
-                        ui.label("Tuner positions:");
-                        ui.horizontal(|ui| {
-                            ui.label("Tuner Step:");
-                            let step_response = ui.add(egui::DragValue::new(&mut self.tuner_step).speed(10.0).clamp_range(1..=10000));
-                            if step_response.changed() {
-                                // tuner_step is just stored, no command needed
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            for tuner_idx in 0..num_tuners {
-                                ui.vertical(|ui| {
-                                    ui.label(format!("Tuner {}", tuner_idx));
-                                    let channel_color = channel_colors[tuner_idx % channel_colors.len()];
-                                    
-                                    // Get tuner position (from separate board or main board)
-                                    let tuner_pos = if tuner_idx < self.tuner_positions.len() {
-                                        self.tuner_positions[tuner_idx]
-                                    } else {
-                                        0
-                                    };
-                                    
-                                    // Rotary dial visualization - circular indicator
-                                    let desired_size = egui::vec2(60.0, 60.0);
-                                    let response = ui.allocate_response(desired_size, egui::Sense::hover());
-                                    let rect = response.rect;
-                                    let painter = ui.painter();
-                                    
-                                    // Draw circle background
-                                    let radius = rect.width() / 2.0 - 2.0;
-                                    painter.circle_filled(rect.center(), radius, egui::Color32::from_rgb(40, 40, 40));
-                                    painter.circle_stroke(rect.center(), radius, egui::Stroke::new(2.0, channel_color));
-                                    
-                                    // Normalize tuner position to 0-2π for dial indicator
-                                    // Tuner range: -100000 to 100000 (Tuner_Driver) or -25000 to 25000 (String_Driver)
-                                    // For rotary dial, map position to angle: 0 at top (12 o'clock), clockwise
-                                    let tuner_range = if self.tuner_port.is_some() {
-                                        200000.0 // Separate tuner board: -100000 to 100000
-                                    } else {
-                                        50000.0  // Main board (stringdriver-1): -25000 to 25000
-                                    };
-                                    let normalized = ((tuner_pos as f32 + tuner_range / 2.0) / tuner_range).clamp(0.0, 1.0);
-                                    let angle = normalized * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2; // Start at top (12 o'clock)
-                                    let radius = rect.width() / 2.0 - 5.0;
-                                    let end_x = rect.center().x + angle.cos() * radius;
-                                    let end_y = rect.center().y - angle.sin() * radius;
-                                    painter.line_segment(
-                                        [rect.center(), egui::pos2(end_x, end_y)],
-                                        (2.0, channel_color)
-                                    );
-                                    
-                                    // Editable number box for absolute position
-                                    // Use key scheme: 10000 + tuner_idx for separate board, main_idx for main board
-                                    let pending_key = if self.tuner_port.is_some() {
-                                        10000 + tuner_idx
-                                    } else if let Some(tuner_first) = self.tuner_first_index {
-                                        tuner_first + tuner_idx
-                                    } else {
-                                        10000 + tuner_idx // fallback
-                                    };
-                                    
-                                    let current_pos = tuner_pos;
-                                    let pending = self.pending_positions.entry(pending_key).or_insert(current_pos);
-                                    
-                                    // Determine tuner range for clamping
-                                    let (tuner_min, tuner_max) = if self.tuner_port.is_some() {
-                                        (-100000, 100000) // Separate tuner board
-                                    } else {
-                                        (-25000, 25000)  // Main board
-                                    };
-                                    
-                                    let response = ui.add(egui::DragValue::new(pending)
-                                        .clamp_range(tuner_min..=tuner_max)
-                                        .speed(100.0));
-                                    
-                                    let has_focus = response.has_focus();
-                                    let lost_focus = response.lost_focus();
-                                    let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                    
-                                    // Only send command when Enter is pressed (lost focus + Enter key)
-                                    if lost_focus && enter_pressed {
-                                        let pending_value = *pending;
-                                        let _ = pending; // Release borrow
-                                        if pending_value != current_pos {
-                                            let clamped = pending_value.clamp(tuner_min, tuner_max);
-                                            self.move_tuner_absolute(tuner_idx, clamped);
-                                        }
-                                        self.pending_positions.insert(pending_key, pending_value);
-                                    } else {
-                                        // Only sync pending value if user is NOT editing (widget not focused)
-                                        if !has_focus && *pending != current_pos {
-                                            *pending = current_pos;
-                                        }
-                                    }
-                                    
-                                    // Control buttons
-                                    ui.horizontal(|ui| {
-                                        if ui.button("-").clicked() {
-                                            self.move_tuner(tuner_idx, -self.tuner_step);
-                                        }
-                                        if ui.button("+").clicked() {
-                                            self.move_tuner(tuner_idx, self.tuner_step);
-                                        }
-                                    });
-                                });
-                                ui.add_space(10.0);
-                            }
-                        });
                     }
                 }
-            });
-            ui.collapsing("Debug log", |ui| {
+                
+                // Z stepper parameter controls (after all pairs)
                 ui.horizontal(|ui| {
-                    if ui.button("Clear log").clicked() {
+                    ui.label("Accel:");
+                    let accel_response = ui.add(egui::DragValue::new(&mut self.z_accel).speed(100.0));
+                    if accel_response.changed() {
+                        self.apply_z_params_to_all();
+                    }
+                    ui.label("Speed:");
+                    let speed_response = ui.add(egui::DragValue::new(&mut self.z_speed).speed(10.0));
+                    if speed_response.changed() {
+                        self.apply_z_params_to_all();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Min:");
+                    let min_response = ui.add(egui::DragValue::new(&mut self.z_min).speed(10.0));
+                    if min_response.changed() {
+                        self.apply_z_params_to_all();
+                    }
+                    ui.label("Max:");
+                    let max_response = ui.add(egui::DragValue::new(&mut self.z_max).speed(10.0));
+                    if max_response.changed() {
+                        self.apply_z_params_to_all();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Z Down Step:");
+                    let mut down_step = self.z_down_step;
+                    let down_response = ui.add(egui::DragValue::new(&mut down_step).speed(1.0).clamp_range(-10..=-2));
+                    if down_response.changed() {
+                        self.z_down_step = down_step;
+                    }
+                    ui.label("Z Up Step:");
+                    let mut up_step = self.z_up_step;
+                    let up_response = ui.add(egui::DragValue::new(&mut up_step).speed(1.0).clamp_range(2..=10));
+                    if up_response.changed() {
+                        self.z_up_step = up_step;
+                    }
+                });
+                ui.separator();
+            });
+            ui.collapsing("Messages", |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Clear").clicked() {
                         self.debug_log.clear();
                     }
-                    if ui.button("Copy log").clicked() {
+                    if ui.button("Copy").clicked() {
                         let log = self.debug_log.clone();
                         ui.output_mut(|o| o.copied_text = log);
                     }
