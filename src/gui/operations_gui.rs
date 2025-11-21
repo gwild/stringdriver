@@ -1016,7 +1016,6 @@ impl eframe::App for OperationsGUI {
                         self.repeat_pending = None;
                     }
                 }
-                ui.label("When off, bump_check commands just report pass");
             });
             
             // Row 1: X Start, X Finish, Adjustment Level
@@ -1492,6 +1491,7 @@ impl eframe::App for OperationsGUI {
             
             // Operations dropdown menu
             ui.heading("Operations");
+            // Row 1: Select Operation and Repeat
             ui.horizontal(|ui| {
                 ui.label("Select Operation:");
                 egui::ComboBox::from_id_source("operation_select")
@@ -1508,40 +1508,41 @@ impl eframe::App for OperationsGUI {
                         ui.selectable_value(&mut self.selected_operation, "x_calibrate".to_string(), "X Calibrate");
                     });
                 
-                ui.horizontal(|ui| {
-                    // Execute button with green background - use Frame with fill
-                    let execute_response = egui::Frame::default()
-                        .fill(egui::Color32::from_rgb(0, 150, 0))
-                        .inner_margin(egui::Margin::same(6.0))
-                        .show(ui, |ui| {
-                            ui.add(egui::Button::new("Execute"))
-                        });
-                    if execute_response.inner.clicked() {
+                let mut repeat_flag = self.repeat_enabled;
+                if ui.checkbox(&mut repeat_flag, "Repeat").changed() {
+                    self.repeat_enabled = repeat_flag;
+                    if !repeat_flag {
                         self.repeat_pending = None;
-                        self.execute_operation();
                     }
-                    
-                    // BREAK button with orange background - use Frame with fill
-                    let operation_running = self.operation_running.load(std::sync::atomic::Ordering::Relaxed);
-                    let break_response = egui::Frame::default()
-                        .fill(egui::Color32::from_rgb(255, 165, 0))
-                        .inner_margin(egui::Margin::same(6.0))
-                        .show(ui, |ui| {
-                            ui.add_enabled(operation_running, egui::Button::new(egui::RichText::new("BREAK").strong()))
-                        });
-                    if break_response.inner.clicked() {
-                        self.exit_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                        self.append_message("Break requested - operation will stop at next check point");
-                    }
-                    
-                    let mut repeat_flag = self.repeat_enabled;
-                    if ui.checkbox(&mut repeat_flag, "Repeat").changed() {
-                        self.repeat_enabled = repeat_flag;
-                        if !repeat_flag {
-                            self.repeat_pending = None;
-                        }
-                    }
-                });
+                }
+            });
+            
+            // Row 2: Execute and BREAK buttons
+            ui.horizontal(|ui| {
+                // Execute button with green background - use Frame with fill
+                let execute_response = egui::Frame::default()
+                    .fill(egui::Color32::from_rgb(0, 150, 0))
+                    .inner_margin(egui::Margin::same(6.0))
+                    .show(ui, |ui| {
+                        ui.add(egui::Button::new("Execute"))
+                    });
+                if execute_response.inner.clicked() {
+                    self.repeat_pending = None;
+                    self.execute_operation();
+                }
+                
+                // BREAK button with orange background - use Frame with fill
+                let operation_running = self.operation_running.load(std::sync::atomic::Ordering::Relaxed);
+                let break_response = egui::Frame::default()
+                    .fill(egui::Color32::from_rgb(255, 165, 0))
+                    .inner_margin(egui::Margin::same(6.0))
+                    .show(ui, |ui| {
+                        ui.add_enabled(operation_running, egui::Button::new(egui::RichText::new("BREAK").strong()))
+                    });
+                if break_response.inner.clicked() {
+                    self.exit_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    self.append_message("Break requested - operation will stop at next check point");
+                }
             });
             
             ui.separator();
@@ -1636,9 +1637,9 @@ fn main() {
     };
     
     println!("Initializing GUI window...");
-    // Position in top right: assume screen width ~1920, window width 420
+    // Position in top right: assume screen width ~1920, window width 430
     // Position at x = screen_width - window_width - margin
-    let window_width = 420.0;
+    let window_width = 430.0;
     let screen_width = 1920.0; // Default, will be adjusted by window manager if needed
     let top_right_x = screen_width - window_width - 20.0; // 20px margin from right edge
     
