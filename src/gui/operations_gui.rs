@@ -268,6 +268,7 @@ struct OperationResult {
     operation: String,
     message: String,
     updated_positions: std::collections::HashMap<usize, i32>,
+    is_progress: bool, // If true, this is a progress update (append immediately), if false, it's the final result
 }
 
 impl OperationsGUI {
@@ -280,14 +281,18 @@ impl OperationsGUI {
         // Get config to know how many channels to read and Arduino port
         let hostname = gethostname::gethostname().to_string_lossy().to_string();
         let ard_settings = config_loader::load_arduino_settings(&hostname)?;
-        let string_num = ard_settings.string_num;
+        let _string_num = ard_settings.string_num; // Not used - we use actual channel count instead
         let port_path = ard_settings.port.clone();
         
         // Create operations with the partials slot (wrap in Arc<Mutex> for sharing with logging thread)
         let operations = Arc::new(RwLock::new(operations::Operations::new_with_partials_slot(Some(Arc::clone(&partials_slot)))?));
         
         // Create Arduino stepper operations client (connects via IPC to stepper_gui's connection)
-        let arduino_ops = Arc::new(Mutex::new(ArduinoStepperOps::new(&port_path)));
+        // Only create if Arduino port is configured
+        let arduino_ops = port_path.as_ref()
+            .map(|p| Arc::new(Mutex::new(ArduinoStepperOps::new(p))))
+            .map(Some)
+            .unwrap_or(None);
         
         // Spawn a thread to periodically update the partials slot from shared memory
         let partials_slot_thread = Arc::clone(&partials_slot);
@@ -299,8 +304,11 @@ impl OperationsGUI {
                     partials_detected_for_thread.load(std::sync::atomic::Ordering::Relaxed),
                 );
                 // Read from shared memory and update the slot
+                // Use large number to read all available channels (not limited by string_num)
+                // The function will read actual_channels_written from control file and limit to that
+                const LARGE_CHANNEL_HINT: usize = 100; // Large enough to read all available channels
                 if let Some(partials) = operations::Operations::read_partials_from_shared_memory(
-                    string_num,
+                    LARGE_CHANNEL_HINT,
                     partial_hint,
                 ) {
                     if let Ok(mut slot) = partials_slot_thread.lock() {
@@ -322,13 +330,18 @@ impl OperationsGUI {
         });
         
         // Initialize thresholds with defaults
-        let string_num = operations.read().unwrap().string_num;
+        // Get actual channel count from operations (will be 0 initially, will grow when audio data arrives)
+        let initial_channel_count = {
+            let ops = operations.read().unwrap();
+            ops.get_voice_count().len().max(ops.get_amp_sum().len())
+        };
         let voice_count_cap = std::cmp::max(1, partials_per_channel.load(std::sync::atomic::Ordering::Relaxed) as i32);
         let voice_count_min_default = std::cmp::min(2, voice_count_cap);
-        let voice_count_min = vec![voice_count_min_default; string_num];
-        let voice_count_max = vec![voice_count_cap; string_num];
-        let amp_sum_min = vec![20; string_num];
-        let amp_sum_max = vec![250; string_num];
+        // Initialize with actual channel count (will be 0 if no audio yet, will resize dynamically)
+        let voice_count_min = vec![voice_count_min_default; initial_channel_count];
+        let voice_count_max = vec![voice_count_cap; initial_channel_count];
+        let amp_sum_min = vec![20; initial_channel_count];
+        let amp_sum_max = vec![250; initial_channel_count];
         let stepper_positions: Arc<Mutex<std::collections::HashMap<usize, i32>>> = Arc::new(Mutex::new(std::collections::HashMap::new()));
         {
             let enabled_snapshot = operations.read().unwrap().get_all_stepper_enabled();
@@ -341,35 +354,38 @@ impl OperationsGUI {
         
         let stepper_roles_metadata = Arc::new({
             let ops_guard = operations.read().unwrap();
-            derive_stepper_roles(&ops_guard, ard_settings.num_steppers)
+            let total_steppers = ard_settings.num_steppers.unwrap_or(0);
+            derive_stepper_roles(&ops_guard, total_steppers)
         });
 
         // Periodically sync stepper positions from stepper_gui (1 Hz) so logger sees live data
-        if let Ok(ops_guard) = arduino_ops.lock() {
-            let socket_path_for_poll = ops_guard.socket_path();
-            let stepper_positions_for_poll = Arc::clone(&stepper_positions);
-            thread::spawn(move || {
-                loop {
-                    thread::sleep(Duration::from_secs(1));
-                    if !std::path::Path::new(&socket_path_for_poll).exists() {
-                        continue;
-                    }
-                    match ArduinoStepperOps::fetch_positions_from_socket(&socket_path_for_poll) {
-                        Ok(values) => {
-                            if let Ok(mut map) = stepper_positions_for_poll.lock() {
-                                for (idx, pos) in values.iter().enumerate() {
-                                    map.insert(idx, *pos);
+        if let Some(arduino_ops_ref) = arduino_ops.as_ref() {
+            if let Ok(ops_guard) = arduino_ops_ref.lock() {
+                let socket_path_for_poll = ops_guard.socket_path();
+                let stepper_positions_for_poll = Arc::clone(&stepper_positions);
+                thread::spawn(move || {
+                    loop {
+                        thread::sleep(Duration::from_secs(1));
+                        if !std::path::Path::new(&socket_path_for_poll).exists() {
+                            continue;
+                        }
+                        match ArduinoStepperOps::fetch_positions_from_socket(&socket_path_for_poll) {
+                            Ok(values) => {
+                                if let Ok(mut map) = stepper_positions_for_poll.lock() {
+                                    for (idx, pos) in values.iter().enumerate() {
+                                        map.insert(idx, *pos);
+                                    }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            eprintln!("Stepper position poll failed: {}", e);
+                            Err(e) => {
+                                eprintln!("Stepper position poll failed: {}", e);
+                            }
                         }
                     }
-                }
-            });
-        } else {
-            eprintln!("WARNING: Failed to acquire Arduino ops lock for position polling");
+                });
+            } else {
+                eprintln!("WARNING: Failed to acquire Arduino ops lock for position polling");
+            }
         }
 
         // Initialize machine state logging (non-blocking, can fail silently)
@@ -394,7 +410,7 @@ impl OperationsGUI {
             let amp_sum_min_clone = Arc::new(Mutex::new(amp_sum_min.clone()));
             let amp_sum_max_clone = Arc::new(Mutex::new(amp_sum_max.clone()));
             let hostname_clone = hostname.clone();
-            let total_steppers = ard_settings.num_steppers;
+            let total_steppers = ard_settings.num_steppers.unwrap_or(0);
             let stepper_roles_clone_for_logger = Arc::clone(&stepper_roles_metadata);
             thread::spawn(move || {
                 use std::time::Instant;
@@ -468,7 +484,7 @@ impl OperationsGUI {
             partials_per_channel: Arc::clone(&partials_per_channel),
             voice_count_cap_cache: voice_count_cap,
             selected_operation: "None".to_string(),
-            arduino_ops: Some(arduino_ops),
+            arduino_ops,
             voice_count_min,
             voice_count_max,
             voice_count_min_logger: voice_count_min_logger_arc,
@@ -552,13 +568,18 @@ impl OperationsGUI {
                         }
                     }
                     self.append_message(&result.message);
-                    self.operation_running.store(false, std::sync::atomic::Ordering::Relaxed);
-                    // Reset exit flag when operation completes (unless it's a kill_all shutdown)
-                    // This allows break button to work without closing the window
-                    self.exit_flag.store(false, std::sync::atomic::Ordering::Relaxed);
-                    should_clear = true;
-                    if self.repeat_enabled && self.selected_operation == result.operation {
-                        schedule_repeat_op = Some(result.operation.clone());
+                    
+                    // If this is a progress message, just append it and continue
+                    // If it's the final result, mark operation as complete
+                    if !result.is_progress {
+                        self.operation_running.store(false, std::sync::atomic::Ordering::Relaxed);
+                        // Reset exit flag when operation completes (unless it's a kill_all shutdown)
+                        // This allows break button to work without closing the window
+                        self.exit_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                        should_clear = true;
+                        if self.repeat_enabled && self.selected_operation == result.operation {
+                            schedule_repeat_op = Some(result.operation.clone());
+                        }
                     }
                 }
                 Err(TryRecvError::Empty) => {}
@@ -743,6 +764,7 @@ impl OperationsGUI {
                             operation: op_name.clone(),
                             message: "Error: Arduino client lock poisoned".to_string(),
                             updated_positions: std::collections::HashMap::new(),
+                            is_progress: false,
                         });
                         return;
                     }
@@ -756,6 +778,7 @@ impl OperationsGUI {
                             operation: op_name.clone(),
                             message: "Error: Operations lock poisoned".to_string(),
                             updated_positions: std::collections::HashMap::new(),
+                            is_progress: false,
                         });
                         return;
                     }
@@ -785,6 +808,21 @@ impl OperationsGUI {
                         if let Ok(x_step) = ArduinoStepperOps::fetch_x_step_from_socket(&socket_path) {
                             ops_guard.set_x_step(x_step);
                         }
+                        // Create progress message channel for real-time updates
+                        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+                        let tx_clone = tx.clone();
+                        let op_name_clone = op_name.clone();
+                        // Spawn thread to forward progress messages
+                        std::thread::spawn(move || {
+                            while let Ok(msg) = progress_rx.recv() {
+                                let _ = tx_clone.send(OperationResult {
+                                    operation: op_name_clone.clone(),
+                                    message: msg,
+                                    updated_positions: std::collections::HashMap::new(),
+                                    is_progress: true,
+                                });
+                            }
+                        });
                         ops_guard.right_left_move(
                         &mut *stepper_client,
                         &mut local_positions,
@@ -794,6 +832,7 @@ impl OperationsGUI {
                         &min_voices,
                         &max_voices,
                         Some(&exit_flag),
+                        Some(&progress_tx),
                         )
                     },
                     "left_right_move" => {
@@ -801,6 +840,21 @@ impl OperationsGUI {
                         if let Ok(x_step) = ArduinoStepperOps::fetch_x_step_from_socket(&socket_path) {
                             ops_guard.set_x_step(x_step);
                         }
+                        // Create progress message channel for real-time updates
+                        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+                        let tx_clone = tx.clone();
+                        let op_name_clone = op_name.clone();
+                        // Spawn thread to forward progress messages
+                        std::thread::spawn(move || {
+                            while let Ok(msg) = progress_rx.recv() {
+                                let _ = tx_clone.send(OperationResult {
+                                    operation: op_name_clone.clone(),
+                                    message: msg,
+                                    updated_positions: std::collections::HashMap::new(),
+                                    is_progress: true,
+                                });
+                            }
+                        });
                         ops_guard.left_right_move(
                         &mut *stepper_client,
                         &mut local_positions,
@@ -810,6 +864,7 @@ impl OperationsGUI {
                         &min_voices,
                         &max_voices,
                         Some(&exit_flag),
+                        Some(&progress_tx),
                         )
                     },
                     "x_home" => ops_guard.x_home(
@@ -863,7 +918,7 @@ impl OperationsGUI {
                 }
             }
 
-            let _ = tx.send(OperationResult { operation: op_name, message, updated_positions });
+            let _ = tx.send(OperationResult { operation: op_name, message, updated_positions, is_progress: false });
         });
     }
 
@@ -1129,7 +1184,14 @@ impl eframe::App for OperationsGUI {
             // Audio analysis display
             ui.heading("Audio Analysis");
             
-            // Voice count display with horizontal meters and thresholds
+            let voice_count = self.operations.read().unwrap().get_voice_count();
+            let amp_sum = self.operations.read().unwrap().get_amp_sum();
+            
+            // Show message if no audio channels available yet
+            if voice_count.is_empty() && amp_sum.is_empty() {
+                ui.label("Waiting for audio data... (audio_monitor may not be running)");
+            } else {
+                // Voice count display with horizontal meters and thresholds
             let voice_cap = self.voice_count_cap_cache.max(1);
             ui.horizontal(|ui| {
                 ui.label(format!("Voice Count (per channel, max {}):", voice_cap));
@@ -1141,7 +1203,11 @@ impl eframe::App for OperationsGUI {
             // Global Voice Count thresholds (sets all channels at once)
             ui.horizontal(|ui| {
                 ui.label("Global Voice Count:");
-                let string_num = self.operations.read().unwrap().string_num;
+                // Get actual channel count from voice_count array (not string_num)
+                let actual_channel_count = {
+                    let ops = self.operations.read().unwrap();
+                    ops.get_voice_count().len()
+                };
                 
                 // Calculate current min/max across all channels for display
                 let current_min = if !self.voice_count_min.is_empty() {
@@ -1160,15 +1226,15 @@ impl eframe::App for OperationsGUI {
                 
                 ui.label("min");
                 if ui.add(egui::DragValue::new(&mut global_min).clamp_range(0..=voice_cap)).changed() {
-                    // Update all channels
-                    self.voice_count_min.resize(string_num, global_min);
+                    // Update all channels (resize to actual channel count)
+                    self.voice_count_min.resize(actual_channel_count, global_min);
                     for val in self.voice_count_min.iter_mut() {
                         *val = global_min;
                     }
                     // Ensure min doesn't exceed max
                     if global_min > global_max {
                         global_max = global_min;
-                        self.voice_count_max.resize(string_num, global_max);
+                        self.voice_count_max.resize(actual_channel_count, global_max);
                         for val in self.voice_count_max.iter_mut() {
                             *val = global_max;
                         }
@@ -1181,8 +1247,8 @@ impl eframe::App for OperationsGUI {
                 // Clamp max to be at least min, but don't change min
                 let max_clamp_min = global_min.max(0);
                 if ui.add(egui::DragValue::new(&mut global_max).clamp_range(max_clamp_min..=voice_cap)).changed() {
-                    // Update all channels
-                    self.voice_count_max.resize(string_num, global_max);
+                    // Update all channels (resize to actual channel count)
+                    self.voice_count_max.resize(actual_channel_count, global_max);
                     for val in self.voice_count_max.iter_mut() {
                         *val = global_max;
                     }
@@ -1191,7 +1257,6 @@ impl eframe::App for OperationsGUI {
                 }
             });
             
-            let voice_count = self.operations.read().unwrap().get_voice_count();
             let mut thresholds_changed = false;
             for (ch_idx, count) in voice_count.iter().enumerate() {
                 ui.horizontal(|ui| {
@@ -1273,7 +1338,11 @@ impl eframe::App for OperationsGUI {
             // Global Amp Sum thresholds (sets all channels at once)
             ui.horizontal(|ui| {
                 ui.label("Global Amp Sum:");
-                let string_num = self.operations.read().unwrap().string_num;
+                // Get actual channel count from amp_sum array (not string_num)
+                let actual_channel_count = {
+                    let ops = self.operations.read().unwrap();
+                    ops.get_amp_sum().len()
+                };
                 
                 // Calculate current min/max across all channels for display
                 let current_min = if !self.amp_sum_min.is_empty() {
@@ -1292,15 +1361,15 @@ impl eframe::App for OperationsGUI {
                 
                 ui.label("min");
                 if ui.add(egui::DragValue::new(&mut global_min).clamp_range(0..=i32::MAX)).changed() {
-                    // Update all channels
-                    self.amp_sum_min.resize(string_num, global_min);
+                    // Update all channels (resize to actual channel count)
+                    self.amp_sum_min.resize(actual_channel_count, global_min);
                     for val in self.amp_sum_min.iter_mut() {
                         *val = global_min;
                     }
                     // Ensure min doesn't exceed max
                     if global_min > global_max {
                         global_max = global_min;
-                        self.amp_sum_max.resize(string_num, global_max);
+                        self.amp_sum_max.resize(actual_channel_count, global_max);
                         for val in self.amp_sum_max.iter_mut() {
                             *val = global_max;
                         }
@@ -1312,8 +1381,8 @@ impl eframe::App for OperationsGUI {
                 // Clamp max to be at least min, but don't change min
                 let max_clamp_min = global_min.max(0);
                 if ui.add(egui::DragValue::new(&mut global_max).clamp_range(max_clamp_min..=i32::MAX)).changed() {
-                    // Update all channels
-                    self.amp_sum_max.resize(string_num, global_max);
+                    // Update all channels (resize to actual channel count)
+                    self.amp_sum_max.resize(actual_channel_count, global_max);
                     for val in self.amp_sum_max.iter_mut() {
                         *val = global_max;
                     }
@@ -1321,7 +1390,6 @@ impl eframe::App for OperationsGUI {
                 }
             });
             
-            let amp_sum = self.operations.read().unwrap().get_amp_sum();
             for (ch_idx, sum) in amp_sum.iter().enumerate() {
                 ui.horizontal(|ui| {
                     // Ensure we have enough elements in the vectors
@@ -1377,6 +1445,7 @@ impl eframe::App for OperationsGUI {
                     });
                 });
             }
+            } // End of else block for when audio data is available
             
             ui.separator();
             

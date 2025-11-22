@@ -27,12 +27,12 @@ Ubuntu:
     SHMEM_PATH: /dev/shm
     CONTROL_FILE: /dev/shm/audio_control
     DB_TABLE: none
-    STRING_NUM: 4
-    ARD_NUM_STEPPERS: 13 #number of steppers in arduino code
-    ARD_PORT: /dev/ttyUSB0
-    X_STEP_INDEX: 0
-    Z_FIRST_INDEX: 1
-    X_MAX_POS: 2600 #dummy value
+    STRING_NUM: null
+    ARD_NUM_STEPPERS: null  # For testing with borrowed hardware from stringdriver-3: 13
+    ARD_PORT: null  # For testing with borrowed hardware from stringdriver-3: /dev/ttyUSB0
+    X_STEP_INDEX: null  # For testing with borrowed hardware from stringdriver-3: 0
+    Z_FIRST_INDEX: null  # For testing with borrowed hardware from stringdriver-3: 1
+    X_MAX_POS: null  # For testing with borrowed hardware from stringdriver-3: 0 (or 2600)
     # No tuners on stringdriver-3 hardware - omit TUNER_FIRST_INDEX so no tuners are created
     ARD_T_PORT: null
     # Binary sizes for Pico (RP2040)
@@ -64,7 +64,7 @@ RaspberryPi:
     ARDUINO_FIRMWARE: string_driver_v2
     GPIO_COMPONENTS:
       Z_TOUCH_PINS: [8, 17, 18, 27, 10, 13, 24, 21] # 8 pins for 4 strings
-    GPIO_MAX_STEPS: 1550 # For guitar setup
+    #GPIO_MAX_STEPS: 1550 # For guitar setup
     STRING_NUM: 4
     # Carriage firmware currently lacks a real X-axis stepper; index 0 is kept
     # as a placeholder so software arrays line up.

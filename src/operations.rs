@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use gethostname::gethostname;
 use crate::config_loader::{load_operations_settings, load_arduino_settings, load_gpio_settings, mainboard_tuner_indices};
 use crate::gpio;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::fs::OpenOptions;
 use std::time::Duration;
@@ -40,6 +40,19 @@ fn calculate_amp_sum(partials: &PartialsData) -> Vec<f32> {
                 .map(|&(_, amp)| amp)
                 .sum()
         })
+        .collect()
+}
+
+/// Calculate delta (difference) in amplitude sum between previous and current values per channel
+/// Returns Vec<f32> where each element is the absolute difference for that channel
+/// If previous is empty or lengths don't match, returns zeros
+fn calculate_amp_delta(previous: &[f32], current: &[f32]) -> Vec<f32> {
+    if previous.is_empty() || previous.len() != current.len() {
+        return vec![0.0; current.len()];
+    }
+    previous.iter()
+        .zip(current.iter())
+        .map(|(prev, curr)| (curr - prev).abs())
         .collect()
 }
 
@@ -103,8 +116,15 @@ impl Operations {
         
         // Load Arduino settings to get Z_FIRST_INDEX and STRING_NUM
         let ard_settings = load_arduino_settings(&hostname)?;
-        let z_first_index = ard_settings.z_first_index
-            .ok_or_else(|| anyhow!("Z_FIRST_INDEX missing for '{}' in string_driver.yaml", hostname))?;
+        let arduino_connected = ard_settings.num_steppers.map_or(false, |n| n > 0);
+        
+        // Z_FIRST_INDEX is only required when Arduino is connected
+        let z_first_index = if arduino_connected {
+            ard_settings.z_first_index
+                .ok_or_else(|| anyhow!("Z_FIRST_INDEX missing for '{}' in string_driver.yaml (required when Arduino is configured)", hostname))?
+        } else {
+            0 // Dummy value when no Arduino - won't be used
+        };
         let string_num = ard_settings.string_num;
         
         // Load z_up_step from operations settings (from YAML - default to 2 if not specified)
@@ -131,7 +151,6 @@ impl Operations {
         // Get GPIO_MAX_STEPS for default X range calculation before moving gpio_settings
         let gpio_max_steps = gpio_settings.as_ref().and_then(|gs| gs.max_steps).map(|v| v as i32);
         let gpio = gpio_settings.map(|_| crate::gpio::GpioBoard::new()).transpose()?;
-        let arduino_connected = ard_settings.num_steppers > 0;
         
         let x_step_index = ard_settings.x_step_index;
         let x_max_pos = ard_settings.x_max_pos;
@@ -154,16 +173,19 @@ impl Operations {
         let tuner_indices = mainboard_tuner_indices(&ard_settings);
         
         // Initialize stepper enabled states (all enabled by default)
+        // Only initialize if Arduino is connected
         let mut stepper_enabled = HashMap::new();
-        for i in 0..(string_num * 2) {
-            let stepper_idx = z_first_index + i;
-            stepper_enabled.insert(stepper_idx, true);
-        }
-        if let Some(x_idx) = x_step_index {
-            stepper_enabled.insert(x_idx, true);
-        }
-        for idx in &tuner_indices {
-            stepper_enabled.insert(*idx, true);
+        if arduino_connected {
+            for i in 0..(string_num * 2) {
+                let stepper_idx = z_first_index + i;
+                stepper_enabled.insert(stepper_idx, true);
+            }
+            if let Some(x_idx) = x_step_index {
+                stepper_enabled.insert(x_idx, true);
+            }
+            for idx in &tuner_indices {
+                stepper_enabled.insert(*idx, true);
+            }
         }
         
         Ok(Self {
@@ -190,8 +212,20 @@ impl Operations {
             stepper_enabled: Arc::new(Mutex::new(stepper_enabled)),
             gpio,
             arduino_connected,
-            voice_count: Arc::new(Mutex::new(vec![0; string_num])),
-            amp_sum: Arc::new(Mutex::new(vec![0.0; string_num])),
+            voice_count: {
+                // Try to initialize with channel count from control file if available
+                let initial_size = Self::read_control_file()
+                    .map(|(ch, _)| ch)
+                    .unwrap_or(0);
+                Arc::new(Mutex::new(vec![0; initial_size]))
+            },
+            amp_sum: {
+                // Try to initialize with channel count from control file if available
+                let initial_size = Self::read_control_file()
+                    .map(|(ch, _)| ch)
+                    .unwrap_or(0);
+                Arc::new(Mutex::new(vec![0.0; initial_size]))
+            },
             partials_slot,
         })
     }
@@ -528,7 +562,7 @@ impl Operations {
     
     /// Read partials data from shared memory file
     /// Returns None if file doesn't exist or can't be read
-    /// num_channels: number of channels to read (typically string_num)
+    /// num_channels: maximum number of channels to read (will read actual_channels_written from control file if available)
     /// num_partials_per_channel: number of partials per channel (hint, will be overridden by control file if available)
     pub fn read_partials_from_shared_memory(num_channels: usize, mut num_partials_per_channel: usize) -> Option<PartialsData> {
         let shm_path = Self::get_shared_memory_path();
@@ -617,19 +651,20 @@ impl Operations {
     /// If partials_slot is None, reads from shared memory file as fallback
     pub fn update_audio_analysis_with_partials(&self, partials: Option<PartialsData>) {
         if let Some(partials) = partials {
-            let num_channels = partials.len().min(self.string_num);
+            // Use actual number of channels from audio data (not limited by string_num)
+            let num_channels = partials.len();
             
             // Use get_results functions for calculations
             let voice_counts = calculate_voice_count(&partials);
             let amp_sums = calculate_amp_sum(&partials);
             
-            // Update voice_count - keep array size at string_num, only update channels that have data
+            // Update voice_count - resize to actual channel count, update all channels
             if let Ok(mut voice_count) = self.voice_count.lock() {
-                // Ensure array is at least string_num size
-                if voice_count.len() < self.string_num {
-                    voice_count.resize(self.string_num, 0);
+                // Resize to actual channel count (not string_num)
+                if voice_count.len() < num_channels {
+                    voice_count.resize(num_channels, 0);
                 }
-                // Update channels that have data
+                // Update all channels that have data
                 for ch_idx in 0..num_channels {
                     if ch_idx < voice_counts.len() && ch_idx < voice_count.len() {
                         voice_count[ch_idx] = voice_counts[ch_idx];
@@ -637,13 +672,13 @@ impl Operations {
                 }
             }
             
-            // Update amp_sum - keep array size at string_num, only update channels that have data
+            // Update amp_sum - resize to actual channel count, update all channels
             if let Ok(mut amp_sum) = self.amp_sum.lock() {
-                // Ensure array is at least string_num size
-                if amp_sum.len() < self.string_num {
-                    amp_sum.resize(self.string_num, 0.0);
+                // Resize to actual channel count (not string_num)
+                if amp_sum.len() < num_channels {
+                    amp_sum.resize(num_channels, 0.0);
                 }
-                // Update channels that have data
+                // Update all channels that have data
                 for ch_idx in 0..num_channels {
                     if ch_idx < amp_sums.len() && ch_idx < amp_sum.len() {
                         amp_sum[ch_idx] = amp_sums[ch_idx];
@@ -664,8 +699,12 @@ impl Operations {
             None  // Force caller to use proper pattern
         } else {
             // Only fallback to shared memory if no slot available
+            // Get actual channel count from control file, or use a large number to read all available channels
             const DEFAULT_NUM_PARTIALS: usize = 12;
-            Self::read_partials_from_shared_memory(self.string_num, DEFAULT_NUM_PARTIALS)
+            let num_channels_hint = Self::read_control_file()
+                .map(|(ch, _)| ch)
+                .unwrap_or(100); // Use large number to read all available channels if control file not available
+            Self::read_partials_from_shared_memory(num_channels_hint, DEFAULT_NUM_PARTIALS)
         };
         self.update_audio_analysis_with_partials(partials);
     }
@@ -1101,6 +1140,22 @@ impl Operations {
         max_voices: &[usize],
         exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<String> {
+        self.z_adjust_with_skip(stepper_ops, positions, max_positions, min_thresholds, max_thresholds, min_voices, max_voices, exit_flag, &HashSet::new())
+    }
+    
+    /// Z-adjust with ability to skip specific channels (e.g., when delta threshold is exceeded)
+    pub fn z_adjust_with_skip<T: StepperOperations>(
+        &self,
+        stepper_ops: &mut T,
+        positions: &mut [i32],
+        max_positions: &HashMap<usize, i32>,
+        min_thresholds: &[f32],
+        max_thresholds: &[f32],
+        min_voices: &[usize],
+        max_voices: &[usize],
+        exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
+        skip_channels: &std::collections::HashSet<usize>,
+    ) -> Result<String> {
         let enabled_states = self.get_all_stepper_enabled();
         let z_up_step = self.get_z_up_step();
         let z_down_step = self.get_z_down_step();
@@ -1116,8 +1171,10 @@ impl Operations {
         
         messages.push("Starting Z adjustment...".to_string());
         
-        // Adjust each string (pair of Z steppers)
-        for string_idx in 0..self.string_num {
+        // Adjust each channel (each channel corresponds to a string with a pair of Z steppers)
+        // Use actual channel count from audio data, not string_num
+        let num_channels = amp_sums.len().min(voice_counts.len());
+        for ch_idx in 0..num_channels {
             // Check exit flag
             if let Some(exit) = exit_flag {
                 if exit.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1126,27 +1183,31 @@ impl Operations {
                 }
             }
             
-            if string_idx >= amp_sums.len() || string_idx >= voice_counts.len() {
+            // Skip this channel if it's in the skip set (e.g., delta threshold exceeded)
+            if skip_channels.contains(&ch_idx) {
+                messages.push(format!("Channel {}: skipping adjustment (delta threshold exceeded, still settling)", ch_idx));
                 continue;
             }
             
-            let amp_sum = amp_sums[string_idx];
-            let voice_count = voice_counts[string_idx];
+            let amp_sum = amp_sums[ch_idx];
+            let voice_count = voice_counts[ch_idx];
             
-            let min_thresh = min_thresholds.get(string_idx).copied().unwrap_or(20.0);
-            let max_thresh = max_thresholds.get(string_idx).copied().unwrap_or(100.0);
-            let min_voice = min_voices.get(string_idx).copied().unwrap_or(0);
-            let max_voice = max_voices.get(string_idx).copied().unwrap_or(12);
+            let min_thresh = min_thresholds.get(ch_idx).copied().unwrap_or(20.0);
+            let max_thresh = max_thresholds.get(ch_idx).copied().unwrap_or(100.0);
+            let min_voice = min_voices.get(ch_idx).copied().unwrap_or(0);
+            let max_voice = max_voices.get(ch_idx).copied().unwrap_or(12);
             
             // Determine which stepper to move (z_in or z_out)
-            let z_in_idx = self.z_first_index + (string_idx * 2);
-            let z_out_idx = self.z_first_index + (string_idx * 2) + 1;
+            // Note: Assumes channel index maps to string index (1:1 mapping)
+            // If channels != strings, this would need a mapping function
+            let z_in_idx = self.z_first_index + (ch_idx * 2);
+            let z_out_idx = self.z_first_index + (ch_idx * 2) + 1;
             
             let z_in_enabled = enabled_states.get(&z_in_idx).copied().unwrap_or(false);
             let z_out_enabled = enabled_states.get(&z_out_idx).copied().unwrap_or(false);
             
             if !z_in_enabled && !z_out_enabled {
-                messages.push(format!("String {}: both steppers disabled, skipping", string_idx));
+                messages.push(format!("Channel {}: both steppers disabled, skipping", ch_idx));
                 continue;
             }
             
@@ -1181,8 +1242,8 @@ impl Operations {
                     } else if z_out_pos < z_in_pos {
                         z_out_idx  // z_out is more negative (closer)
                     } else {
-                        // Equal positions: alternate based on string index to keep balanced
-                        if string_idx % 2 == 0 {
+                        // Equal positions: alternate based on channel index to keep balanced
+                        if ch_idx % 2 == 0 {
                             z_in_idx
                         } else {
                             z_out_idx
@@ -1197,8 +1258,8 @@ impl Operations {
                     } else if z_out_pos > z_in_pos {
                         z_out_idx  // z_out is less negative/more positive (farther)
                     } else {
-                        // Equal positions: alternate based on string index to keep balanced
-                        if string_idx % 2 == 0 {
+                        // Equal positions: alternate based on channel index to keep balanced
+                        if ch_idx % 2 == 0 {
                             z_out_idx
                         } else {
                             z_in_idx
@@ -1218,8 +1279,8 @@ impl Operations {
                         "unknown".to_string()
                     };
                     messages.push(format!(
-                        "String {}: too close ({}, amp={:.2}, voices={}), moved stepper {} (closest) up by {}",
-                        string_idx, reason, amp_sum, voice_count, stepper_to_move, z_up_step
+                        "Channel {}: too close ({}, amp={:.2}, voices={}), moved stepper {} (closest) up by {}",
+                        ch_idx, reason, amp_sum, voice_count, stepper_to_move, z_up_step
                     ));
                     self.rest_lap();
                 } else {
@@ -1234,15 +1295,15 @@ impl Operations {
                         "unknown".to_string()
                     };
                     messages.push(format!(
-                        "String {}: too far ({}, amp={:.2}, voices={}), moved stepper {} (farthest) down by {}",
-                        string_idx, reason, amp_sum, voice_count, stepper_to_move, z_down_step
+                        "Channel {}: too far ({}, amp={:.2}, voices={}), moved stepper {} (farthest) down by {}",
+                        ch_idx, reason, amp_sum, voice_count, stepper_to_move, z_down_step
                     ));
                     self.rest_lap();
                 }
             } else {
                 messages.push(format!(
-                    "String {}: in range (amp={:.2}, voices={})",
-                    string_idx, amp_sum, voice_count
+                    "Channel {}: in range (amp={:.2}, voices={})",
+                    ch_idx, amp_sum, voice_count
                 ));
             }
         }
@@ -1259,6 +1320,7 @@ impl Operations {
     /// Right to left move operation: moves X from x_start to x_finish, adjusting Z at each position
     /// Uses Adjustment Level to iterate in place until successfully passing the value
     /// If attempts exceed Retry Threshold or Z variance threshold, performs calibration
+    /// progress_sender: Optional sender to stream progress messages in real-time
     pub fn right_left_move<T: StepperOperations>(
         &self,
         stepper_ops: &mut T,
@@ -1269,6 +1331,7 @@ impl Operations {
         min_voices: &[usize],
         max_voices: &[usize],
         exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
+        progress_sender: Option<&std::sync::mpsc::Sender<String>>,
     ) -> Result<String> {
         let x_step_index = self.x_step_index.ok_or_else(|| anyhow!("X stepper not configured"))?;
         let x_start = self.get_x_start();
@@ -1277,6 +1340,7 @@ impl Operations {
         let adjustment_level = self.get_adjustment_level();
         let retry_threshold = self.get_retry_threshold();
         let z_variance_threshold = self.get_z_variance_threshold();
+        let delta_threshold = self.get_delta_threshold() as f32;
         
         let mut messages = Vec::new();
         messages.push(format!("Starting right_left_move: X from {} to {} (step: {})", x_start, x_finish, x_step));
@@ -1315,6 +1379,7 @@ impl Operations {
             let mut pass_count = 0; // Consecutive successful passes
             let mut attempts = 0; // Total attempts (for retry threshold)
             let mut last_voice_counts = Vec::new();
+            let mut last_amp_sums = Vec::new(); // Track previous amp_sum for delta calculation
             
             loop {
                 // Check exit flag
@@ -1327,8 +1392,50 @@ impl Operations {
                 
                 attempts += 1;
                 
-                // Run z_adjust
-                let z_adjust_msg = self.z_adjust(
+                // Get current amp_sums before adjustment
+                let current_amp_sums = self.get_amp_sum();
+                
+                // Calculate delta per channel (difference from previous amp_sum)
+                let amp_deltas = calculate_amp_delta(&last_amp_sums, &current_amp_sums);
+                
+                // Determine which channels to skip (delta threshold exceeded)
+                let mut skip_channels = HashSet::new();
+                for (ch_idx, delta) in amp_deltas.iter().enumerate() {
+                    if *delta > delta_threshold {
+                        skip_channels.insert(ch_idx);
+                    }
+                }
+                
+                // Calculate Z variance (sum of absolute differences in voice counts)
+                let voice_counts = self.get_voice_count();
+                let z_variance = if !last_voice_counts.is_empty() && last_voice_counts.len() == voice_counts.len() {
+                    voice_counts.iter()
+                        .zip(last_voice_counts.iter())
+                        .map(|(curr, last)| ((*curr as i32) - (*last as i32)).abs())
+                        .sum::<i32>()
+                } else {
+                    0
+                };
+                
+                // Per-loop message: Retries, Level, Delta per channel, Z variance
+                let delta_str = amp_deltas.iter()
+                    .enumerate()
+                    .map(|(ch, delta)| format!("Ch{}:{:.2}", ch, delta))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let loop_msg = format!(
+                    "Loop at X={}: Retries={}, Level={}/{}, Delta=[{}], Zvariance={}",
+                    current_x, attempts, pass_count, adjustment_level, delta_str, z_variance
+                );
+                messages.push(loop_msg.clone());
+                
+                // Send progress message in real-time if sender provided
+                if let Some(sender) = progress_sender {
+                    let _ = sender.send(loop_msg);
+                }
+                
+                // Run z_adjust with skip_channels (channels exceeding delta threshold are skipped)
+                let z_adjust_msg = self.z_adjust_with_skip(
                     stepper_ops,
                     positions,
                     max_positions,
@@ -1337,6 +1444,7 @@ impl Operations {
                     min_voices,
                     max_voices,
                     exit_flag,
+                    &skip_channels,
                 )?;
                 
                 // Run bump_check
@@ -1353,23 +1461,24 @@ impl Operations {
                      bump_msg.contains("bump_check disabled") || 
                      bump_msg.contains("no GPIO"));
                 
-                // Get current voice counts and amp sums
+                // Get current voice counts and amp sums (refresh after z_adjust)
                 let voice_counts = self.get_voice_count();
                 let amp_sums = self.get_amp_sum();
                 
+                // Update last_amp_sums for next iteration delta calculation
+                last_amp_sums = amp_sums.clone();
+                
                 // Check if all channels are within their min/max ranges (green indicators)
                 // A pass is when voice_count AND amp_sum for all channels are within their ranges
-                let voice_amp_pass = (0..self.string_num).all(|string_idx| {
-                    if string_idx >= amp_sums.len() || string_idx >= voice_counts.len() {
-                        return false;
-                    }
-                    let amp_sum = amp_sums[string_idx];
-                    let voice_count = voice_counts[string_idx];
+                let num_channels = amp_sums.len().min(voice_counts.len());
+                let voice_amp_pass = (0..num_channels).all(|ch_idx| {
+                    let amp_sum = amp_sums[ch_idx];
+                    let voice_count = voice_counts[ch_idx];
                     
-                    let min_thresh = min_thresholds.get(string_idx).copied().unwrap_or(20.0);
-                    let max_thresh = max_thresholds.get(string_idx).copied().unwrap_or(100.0);
-                    let min_voice = min_voices.get(string_idx).copied().unwrap_or(0);
-                    let max_voice = max_voices.get(string_idx).copied().unwrap_or(12);
+                    let min_thresh = min_thresholds.get(ch_idx).copied().unwrap_or(20.0);
+                    let max_thresh = max_thresholds.get(ch_idx).copied().unwrap_or(100.0);
+                    let min_voice = min_voices.get(ch_idx).copied().unwrap_or(0);
+                    let max_voice = max_voices.get(ch_idx).copied().unwrap_or(12);
                     
                     // Check both amp_sum and voice_count are within their ranges
                     amp_sum >= min_thresh && amp_sum <= max_thresh &&
@@ -1432,28 +1541,28 @@ impl Operations {
                     // Reset counters after calibration
                     pass_count = 0;
                     attempts = 0;
+                    // Reset tracking arrays after calibration
+                    last_voice_counts.clear();
+                    last_amp_sums.clear();
                     // Continue trying at current X position
                 }
                 
-                // Check Z variance threshold
-                if !last_voice_counts.is_empty() && last_voice_counts.len() == voice_counts.len() {
-                    let variance: i32 = voice_counts.iter()
-                        .zip(last_voice_counts.iter())
-                        .map(|(curr, last)| ((*curr as i32) - (*last as i32)).abs())
-                        .sum();
-                    
-                    if variance > z_variance_threshold {
-                        messages.push(format!("Z variance threshold {} exceeded at X={}, performing calibration", z_variance_threshold, current_x));
-                        let cal_msg = self.z_calibrate(stepper_ops, positions, max_positions, exit_flag)?;
-                        messages.push(cal_msg);
-                        // Reset counters after calibration
-                        pass_count = 0;
-                        attempts = 0;
-                        // Continue trying at current X position
-                    }
+                // Check Z variance threshold (using already calculated z_variance)
+                if z_variance > z_variance_threshold {
+                    messages.push(format!("Z variance threshold {} exceeded at X={}, performing calibration", z_variance_threshold, current_x));
+                    let cal_msg = self.z_calibrate(stepper_ops, positions, max_positions, exit_flag)?;
+                    messages.push(cal_msg);
+                    // Reset counters after calibration
+                    pass_count = 0;
+                    attempts = 0;
+                    // Reset tracking arrays after calibration
+                    last_voice_counts.clear();
+                    last_amp_sums.clear();
+                    // Continue trying at current X position
+                } else {
+                    // Update tracking arrays for next iteration
+                    last_voice_counts = voice_counts.clone();
                 }
-                
-                last_voice_counts = voice_counts.clone();
             }
             
             // Break if we've reached x_finish
@@ -1469,6 +1578,7 @@ impl Operations {
     /// Left to right move operation: moves X from x_finish to x_start, adjusting Z at each position
     /// Uses Adjustment Level to iterate in place until successfully passing the value
     /// If attempts exceed Retry Threshold or Z variance threshold, performs calibration
+    /// progress_sender: Optional sender to stream progress messages in real-time
     pub fn left_right_move<T: StepperOperations>(
         &self,
         stepper_ops: &mut T,
@@ -1479,6 +1589,7 @@ impl Operations {
         min_voices: &[usize],
         max_voices: &[usize],
         exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
+        progress_sender: Option<&std::sync::mpsc::Sender<String>>,
     ) -> Result<String> {
         let x_step_index = self.x_step_index.ok_or_else(|| anyhow!("X stepper not configured"))?;
         let x_start = self.get_x_start();
@@ -1487,6 +1598,7 @@ impl Operations {
         let adjustment_level = self.get_adjustment_level();
         let retry_threshold = self.get_retry_threshold();
         let z_variance_threshold = self.get_z_variance_threshold();
+        let delta_threshold = self.get_delta_threshold() as f32;
         
         let mut messages = Vec::new();
         messages.push(format!("Starting left_right_move: X from {} to {} (step: {})", x_finish, x_start, x_step));
@@ -1525,6 +1637,7 @@ impl Operations {
             let mut pass_count = 0; // Consecutive successful passes
             let mut attempts = 0; // Total attempts (for retry threshold)
             let mut last_voice_counts = Vec::new();
+            let mut last_amp_sums = Vec::new(); // Track previous amp_sum for delta calculation
             
             loop {
                 // Check exit flag
@@ -1537,8 +1650,50 @@ impl Operations {
                 
                 attempts += 1;
                 
-                // Run z_adjust
-                let z_adjust_msg = self.z_adjust(
+                // Get current amp_sums before adjustment
+                let current_amp_sums = self.get_amp_sum();
+                
+                // Calculate delta per channel (difference from previous amp_sum)
+                let amp_deltas = calculate_amp_delta(&last_amp_sums, &current_amp_sums);
+                
+                // Determine which channels to skip (delta threshold exceeded)
+                let mut skip_channels = HashSet::new();
+                for (ch_idx, delta) in amp_deltas.iter().enumerate() {
+                    if *delta > delta_threshold {
+                        skip_channels.insert(ch_idx);
+                    }
+                }
+                
+                // Calculate Z variance (sum of absolute differences in voice counts)
+                let voice_counts = self.get_voice_count();
+                let z_variance = if !last_voice_counts.is_empty() && last_voice_counts.len() == voice_counts.len() {
+                    voice_counts.iter()
+                        .zip(last_voice_counts.iter())
+                        .map(|(curr, last)| ((*curr as i32) - (*last as i32)).abs())
+                        .sum::<i32>()
+                } else {
+                    0
+                };
+                
+                // Per-loop message: Retries, Level, Delta per channel, Z variance
+                let delta_str = amp_deltas.iter()
+                    .enumerate()
+                    .map(|(ch, delta)| format!("Ch{}:{:.2}", ch, delta))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let loop_msg = format!(
+                    "Loop at X={}: Retries={}, Level={}/{}, Delta=[{}], Zvariance={}",
+                    current_x, attempts, pass_count, adjustment_level, delta_str, z_variance
+                );
+                messages.push(loop_msg.clone());
+                
+                // Send progress message in real-time if sender provided
+                if let Some(sender) = progress_sender {
+                    let _ = sender.send(loop_msg);
+                }
+                
+                // Run z_adjust with skip_channels (channels exceeding delta threshold are skipped)
+                let z_adjust_msg = self.z_adjust_with_skip(
                     stepper_ops,
                     positions,
                     max_positions,
@@ -1547,6 +1702,7 @@ impl Operations {
                     min_voices,
                     max_voices,
                     exit_flag,
+                    &skip_channels,
                 )?;
                 
                 // Run bump_check
@@ -1563,23 +1719,24 @@ impl Operations {
                      bump_msg.contains("bump_check disabled") || 
                      bump_msg.contains("no GPIO"));
                 
-                // Get current voice counts and amp sums
+                // Get current voice counts and amp sums (refresh after z_adjust)
                 let voice_counts = self.get_voice_count();
                 let amp_sums = self.get_amp_sum();
                 
+                // Update last_amp_sums for next iteration delta calculation
+                last_amp_sums = amp_sums.clone();
+                
                 // Check if all channels are within their min/max ranges (green indicators)
                 // A pass is when voice_count AND amp_sum for all channels are within their ranges
-                let voice_amp_pass = (0..self.string_num).all(|string_idx| {
-                    if string_idx >= amp_sums.len() || string_idx >= voice_counts.len() {
-                        return false;
-                    }
-                    let amp_sum = amp_sums[string_idx];
-                    let voice_count = voice_counts[string_idx];
+                let num_channels = amp_sums.len().min(voice_counts.len());
+                let voice_amp_pass = (0..num_channels).all(|ch_idx| {
+                    let amp_sum = amp_sums[ch_idx];
+                    let voice_count = voice_counts[ch_idx];
                     
-                    let min_thresh = min_thresholds.get(string_idx).copied().unwrap_or(20.0);
-                    let max_thresh = max_thresholds.get(string_idx).copied().unwrap_or(100.0);
-                    let min_voice = min_voices.get(string_idx).copied().unwrap_or(0);
-                    let max_voice = max_voices.get(string_idx).copied().unwrap_or(12);
+                    let min_thresh = min_thresholds.get(ch_idx).copied().unwrap_or(20.0);
+                    let max_thresh = max_thresholds.get(ch_idx).copied().unwrap_or(100.0);
+                    let min_voice = min_voices.get(ch_idx).copied().unwrap_or(0);
+                    let max_voice = max_voices.get(ch_idx).copied().unwrap_or(12);
                     
                     // Check both amp_sum and voice_count are within their ranges
                     amp_sum >= min_thresh && amp_sum <= max_thresh &&
@@ -1642,28 +1799,28 @@ impl Operations {
                     // Reset counters after calibration
                     pass_count = 0;
                     attempts = 0;
+                    // Reset tracking arrays after calibration
+                    last_voice_counts.clear();
+                    last_amp_sums.clear();
                     // Continue trying at current X position
                 }
                 
-                // Check Z variance threshold
-                if !last_voice_counts.is_empty() && last_voice_counts.len() == voice_counts.len() {
-                    let variance: i32 = voice_counts.iter()
-                        .zip(last_voice_counts.iter())
-                        .map(|(curr, last)| ((*curr as i32) - (*last as i32)).abs())
-                        .sum();
-                    
-                    if variance > z_variance_threshold {
-                        messages.push(format!("Z variance threshold {} exceeded at X={}, performing calibration", z_variance_threshold, current_x));
-                        let cal_msg = self.z_calibrate(stepper_ops, positions, max_positions, exit_flag)?;
-                        messages.push(cal_msg);
-                        // Reset counters after calibration
-                        pass_count = 0;
-                        attempts = 0;
-                        // Continue trying at current X position
-                    }
+                // Check Z variance threshold (using already calculated z_variance)
+                if z_variance > z_variance_threshold {
+                    messages.push(format!("Z variance threshold {} exceeded at X={}, performing calibration", z_variance_threshold, current_x));
+                    let cal_msg = self.z_calibrate(stepper_ops, positions, max_positions, exit_flag)?;
+                    messages.push(cal_msg);
+                    // Reset counters after calibration
+                    pass_count = 0;
+                    attempts = 0;
+                    // Reset tracking arrays after calibration
+                    last_voice_counts.clear();
+                    last_amp_sums.clear();
+                    // Continue trying at current X position
+                } else {
+                    // Update tracking arrays for next iteration
+                    last_voice_counts = voice_counts.clone();
                 }
-                
-                last_voice_counts = voice_counts.clone();
             }
             
             // Break if we've reached x_start

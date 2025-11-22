@@ -31,8 +31,8 @@ impl ArduinoFirmware {
 
 #[derive(Debug, Clone)]
 pub struct ArduinoSettings {
-    pub port: String,
-    pub num_steppers: usize,
+    pub port: Option<String>, // None means no Arduino connected
+    pub num_steppers: Option<usize>, // None means no Arduino connected
     pub string_num: usize,
     pub x_step_index: Option<usize>, // None means no X stepper
     pub x_max_pos: Option<i32>, // X_MAX_POS from YAML
@@ -68,13 +68,22 @@ pub fn load_arduino_settings(hostname: &str) -> Result<ArduinoSettings> {
     let host_block = host_block.ok_or_else(|| anyhow!("No host entry for '{}' in string_driver.yaml", hostname))?;
 
     let ard_port = host_block.get(&serde_yaml::Value::from("ARD_PORT"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("ARD_PORT missing for '{}' in string_driver.yaml", hostname))?
-        .to_string();
+        .and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(|s| s.to_string())
+            }
+        });
 
     let num = host_block.get(&serde_yaml::Value::from("ARD_NUM_STEPPERS"))
-        .and_then(|v| v.as_i64())
-        .ok_or_else(|| anyhow!("ARD_NUM_STEPPERS missing for '{}' in string_driver.yaml", hostname))? as usize;
+        .and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_i64().map(|v| v as usize)
+            }
+        });
 
     let string_num = host_block.get(&serde_yaml::Value::from("STRING_NUM"))
         .and_then(|v| v.as_i64())

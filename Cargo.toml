@@ -63,3 +63,7 @@ path = "src/gui/operations_gui.rs"
 name = "launcher"
 path = "src/gui/launcher.rs"
 
+[[bin]]
+name = "master_gui"
+path = "src/gui/master_gui.rs"
+

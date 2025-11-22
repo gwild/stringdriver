@@ -1625,9 +1625,21 @@ fn main() {
         None
     };
 
+    // Check if Arduino is configured
+    let port = settings.port.unwrap_or_else(|| {
+        eprintln!("ERROR: No Arduino port configured for host '{}'. Set ARD_PORT in string_driver.yaml or use null if no Arduino.", hostname);
+        eprintln!("stepper_gui requires an Arduino connection. Exiting.");
+        std::process::exit(1);
+    });
+    let num_steppers = settings.num_steppers.unwrap_or_else(|| {
+        eprintln!("ERROR: No Arduino steppers configured for host '{}'. Set ARD_NUM_STEPPERS in string_driver.yaml or use null if no Arduino.", hostname);
+        eprintln!("stepper_gui requires an Arduino connection. Exiting.");
+        std::process::exit(1);
+    });
+
     let mut app = StepperGUI::new(
-        settings.port.clone(),
-        settings.num_steppers,
+        port.clone(),
+        num_steppers,
         settings.string_num,
         settings.x_step_index,
         settings.z_first_index,
@@ -1653,7 +1665,7 @@ fn main() {
     
     // If connection failed, show error but still launch GUI
     if !app.connected {
-        eprintln!("WARNING: Failed to connect to Arduino at {}", settings.port);
+        eprintln!("WARNING: Failed to connect to Arduino at {}", port);
     }
     
     // Start Unix socket listener for IPC commands

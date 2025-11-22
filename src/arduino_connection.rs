@@ -11,6 +11,7 @@ use std::time::Duration;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use anyhow::{Result, anyhow};
 use serde_json;
 
@@ -55,6 +56,9 @@ impl ArduinoConnectionManager {
     }
     
     pub fn connect(&mut self) -> Result<()> {
+        // Close existing connection if any
+        self.disconnect();
+        
         let port_path = self.port_path.clone();
         self.kill_port_users(&port_path);
         match serialport::new(self.port_path.as_str(), 115200)
@@ -67,9 +71,47 @@ impl ArduinoConnectionManager {
                 Ok(())
             }
             Err(e) => {
+                self.connected = false;
                 Err(anyhow!("Connection failed: {}", e))
             }
         }
+    }
+    
+    fn disconnect(&mut self) {
+        self.port = None;
+        self.connected = false;
+    }
+    
+    /// Check if the port file exists (device is available)
+    fn port_available(&self) -> bool {
+        Path::new(&self.port_path).exists()
+    }
+    
+    /// Attempt to reconnect if connection is lost
+    fn ensure_connected(&mut self) -> Result<()> {
+        if self.connected && self.port.is_some() {
+            return Ok(());
+        }
+        
+        // Check if port is available before attempting connection
+        if !self.port_available() {
+            return Err(anyhow!("Port {} not available", self.port_path));
+        }
+        
+        // Attempt to reconnect
+        self.connect()
+    }
+    
+    /// Check if an error indicates connection loss
+    fn is_connection_error(err: &anyhow::Error) -> bool {
+        let err_str = format!("{:#}", err);
+        err_str.contains("Broken pipe")
+            || err_str.contains("Connection reset")
+            || err_str.contains("Device not found")
+            || err_str.contains("No such file")
+            || err_str.contains("Permission denied")
+            || err_str.contains("Resource temporarily unavailable")
+            || err_str.contains("Input/output error")
     }
     
     fn kill_port_users(&mut self, port_path: &str) {
@@ -111,9 +153,9 @@ impl ArduinoConnectionManager {
     }
     
     fn send_cmd_bin(&mut self, cmd_id: u8, stepper_idx: i16, value: i32) -> Result<()> {
-        if self.port.is_none() {
-            return Err(anyhow!("Port not connected"));
-        }
+        // Ensure connection before sending
+        self.ensure_connected()?;
+        
         let mut buf: Vec<u8> = Vec::with_capacity(20);
         buf.push(b'0' + cmd_id);
         buf.push(b',');
@@ -125,50 +167,97 @@ impl ArduinoConnectionManager {
         let escaped_value = Self::escape_cmdmessenger_bytes(&value_bytes);
         buf.extend_from_slice(&escaped_value);
         buf.push(b';');
-        if let Some(p) = self.port.as_mut() {
-            p.write_all(&buf)?;
-            p.flush()?;
+        
+        match self.port.as_mut() {
+            Some(p) => {
+                match p.write_all(&buf) {
+                    Ok(_) => {
+                        match p.flush() {
+                            Ok(_) => Ok(()),
+                            Err(e) => {
+                                if Self::is_connection_error(&anyhow!(e)) {
+                                    self.disconnect();
+                                }
+                                Err(anyhow!("Flush error: {}", e))
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if Self::is_connection_error(&anyhow!(e)) {
+                            self.disconnect();
+                        }
+                        Err(anyhow!("Write error: {}", e))
+                    }
+                }
+            }
+            None => Err(anyhow!("Port not connected")),
         }
-        Ok(())
     }
     
     pub fn rel_move(&mut self, stepper: usize, delta: i32) -> Result<()> {
-        if !self.connected {
-            return Err(anyhow!("Arduino not connected"));
-        }
+        // Ensure connection before operation
+        self.ensure_connected()?;
+        
         if let Some(p) = self.port.as_mut() {
             let _ = p.clear(serialport::ClearBuffer::Input);
         }
         let s = stepper as i16;
-        self.send_cmd_bin(3, s, delta)?; // rmove is command ID 3
-        std::thread::sleep(Duration::from_millis(500)); // Wait for move completion
-        Ok(())
+        match self.send_cmd_bin(3, s, delta) { // rmove is command ID 3
+            Ok(_) => {
+                std::thread::sleep(Duration::from_millis(500)); // Wait for move completion
+                Ok(())
+            }
+            Err(e) => {
+                if Self::is_connection_error(&e) {
+                    self.disconnect();
+                }
+                Err(e)
+            }
+        }
     }
     
     pub fn abs_move(&mut self, stepper: usize, position: i32) -> Result<()> {
-        if !self.connected {
-            return Err(anyhow!("Arduino not connected"));
-        }
+        // Ensure connection before operation
+        self.ensure_connected()?;
+        
         if let Some(p) = self.port.as_mut() {
             let _ = p.clear(serialport::ClearBuffer::Input);
         }
         let s = stepper as i16;
-        self.send_cmd_bin(2, s, position)?; // amove is command ID 2
-        std::thread::sleep(Duration::from_millis(500)); // Wait for move completion
-        Ok(())
+        match self.send_cmd_bin(2, s, position) { // amove is command ID 2
+            Ok(_) => {
+                std::thread::sleep(Duration::from_millis(500)); // Wait for move completion
+                Ok(())
+            }
+            Err(e) => {
+                if Self::is_connection_error(&e) {
+                    self.disconnect();
+                }
+                Err(e)
+            }
+        }
     }
     
     pub fn reset(&mut self, stepper: usize, position: i32) -> Result<()> {
-        if !self.connected {
-            return Err(anyhow!("Arduino not connected"));
-        }
+        // Ensure connection before operation
+        self.ensure_connected()?;
+        
         if let Some(p) = self.port.as_mut() {
             let _ = p.clear(serialport::ClearBuffer::Input);
         }
         let s = stepper as i16;
-        self.send_cmd_bin(4, s, position)?; // set_stepper is command ID 4
-        std::thread::sleep(Duration::from_millis(100));
-        Ok(())
+        match self.send_cmd_bin(4, s, position) { // set_stepper is command ID 4
+            Ok(_) => {
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(())
+            }
+            Err(e) => {
+                if Self::is_connection_error(&e) {
+                    self.disconnect();
+                }
+                Err(e)
+            }
+        }
     }
     
     
@@ -178,17 +267,35 @@ impl ArduinoConnectionManager {
     
     /// Read positions from Arduino (stepper_gui needs this)
     pub fn read_positions(&mut self, num_steppers: usize) -> Result<Vec<i32>> {
-        if !self.connected {
-            return Err(anyhow!("Arduino not connected"));
-        }
+        // Ensure connection before reading
+        self.ensure_connected()?;
         
         let port = self.port.as_mut().ok_or_else(|| anyhow!("Port not available"))?;
         let send = b"1;";
         
         // Flush input buffer before command
         let _ = port.clear(serialport::ClearBuffer::Input);
-        port.write_all(send)?;
-        port.flush()?;
+        
+        // Write command with error handling
+        match port.write_all(send) {
+            Ok(_) => {
+                match port.flush() {
+                    Ok(_) => {}
+                    Err(e) => {
+                        if Self::is_connection_error(&anyhow!(e)) {
+                            self.disconnect();
+                        }
+                        return Err(anyhow!("Flush error: {}", e));
+                    }
+                }
+            }
+            Err(e) => {
+                if Self::is_connection_error(&anyhow!(e)) {
+                    self.disconnect();
+                }
+                return Err(anyhow!("Write error: {}", e));
+            }
+        }
         
         // Wait for Arduino to send positions
         std::thread::sleep(Duration::from_millis(50));
@@ -215,6 +322,10 @@ impl ArduinoConnectionManager {
                     if err_str.contains("timeout") || err_str.contains("TimedOut") {
                         std::thread::sleep(Duration::from_millis(10));
                         continue;
+                    }
+                    // Connection error - mark as disconnected
+                    if Self::is_connection_error(&anyhow!(&err_str)) {
+                        self.disconnect();
                     }
                     return Err(anyhow!("Read error: {}", e));
                 }
@@ -268,12 +379,39 @@ impl ArduinoConnectionManager {
         Ok(positions)
     }
     
+    /// Start background connection monitoring thread
+    fn start_connection_monitor(manager: Arc<Mutex<ArduinoConnectionManager>>) {
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(1)); // Check every second
+                
+                let should_reconnect = {
+                    let mgr = manager.lock().unwrap();
+                    !mgr.connected && mgr.port_available()
+                };
+                
+                if should_reconnect {
+                    let mut mgr = manager.lock().unwrap();
+                    if let Err(e) = mgr.ensure_connected() {
+                        // Connection failed, will retry on next iteration
+                        eprintln!("Connection monitor: reconnection attempt failed: {}", e);
+                    } else {
+                        eprintln!("Connection monitor: successfully reconnected to Arduino");
+                    }
+                }
+            }
+        });
+    }
+    
     /// Start IPC server to handle commands from other processes
     pub fn start_ipc_server(manager: Arc<Mutex<ArduinoConnectionManager>>) -> Result<()> {
         let port_path = manager.lock().unwrap().port_path.clone();
         let socket_path = get_socket_path(&port_path);
         // Remove old socket if it exists
         let _ = std::fs::remove_file(&socket_path);
+        
+        // Start connection monitoring thread
+        Self::start_connection_monitor(Arc::clone(&manager));
         
         let listener = UnixListener::bind(&socket_path)?;
         
