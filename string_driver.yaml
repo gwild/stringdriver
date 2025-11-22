@@ -64,7 +64,7 @@ RaspberryPi:
     ARDUINO_FIRMWARE: string_driver_v2
     GPIO_COMPONENTS:
       Z_TOUCH_PINS: [8, 17, 18, 27, 10, 13, 24, 21] # 8 pins for 4 strings
-    #GPIO_MAX_STEPS: 1550 # For guitar setup
+    GPIO_MAX_STEPS: null  # Not needed - no X-axis stepper hardware on stringdriver-3
     STRING_NUM: 4
     # Carriage firmware currently lacks a real X-axis stepper; index 0 is kept
     # as a placeholder so software arrays line up.

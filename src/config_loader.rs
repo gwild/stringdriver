@@ -406,13 +406,10 @@ pub fn load_gpio_settings(hostname: &str) -> Result<Option<GpioSettings>> {
             }
         });
 
-    // If GPIO is enabled, require GPIO_LIBRARY and GPIO_MAX_STEPS (fail-fast per rules)
+    // If GPIO is enabled, require GPIO_LIBRARY (fail-fast per rules)
+    // GPIO_MAX_STEPS is optional - only needed if X-axis stepper hardware is present
     if library.is_none() {
         return Err(anyhow!("GPIO_ENABLED is true but GPIO_LIBRARY is missing for '{}' in string_driver.yaml", hostname));
-    }
-
-    if max_steps.is_none() {
-        return Err(anyhow!("GPIO_ENABLED is true but GPIO_MAX_STEPS is missing for '{}' in string_driver.yaml", hostname));
     }
 
     Ok(Some(GpioSettings {

@@ -59,14 +59,13 @@ impl GpioBoard {
                 return Ok(Self::disabled());
             }
             
-            // GPIO is enabled - require library and max_steps (fail-fast per rules)
+            // GPIO is enabled - require library (fail-fast per rules)
+            // GPIO_MAX_STEPS is optional - only needed if X-axis stepper hardware is present
             let library = settings.library.ok_or_else(|| {
                 anyhow!("GPIO_ENABLED is true but GPIO_LIBRARY is missing for hostname '{}'", hostname)
             })?;
             
-            let max_steps = settings.max_steps.ok_or_else(|| {
-                anyhow!("GPIO_ENABLED is true but GPIO_MAX_STEPS is missing for hostname '{}'", hostname)
-            })?;
+            let max_steps = settings.max_steps; // Optional - only needed for X-axis stepper
             
             let components = settings.components.ok_or_else(|| {
                 anyhow!("GPIO_ENABLED is true but GPIO_COMPONENTS is missing for hostname '{}'", hostname)
@@ -109,7 +108,7 @@ impl GpioBoard {
     
     /// Initialize GPIO components using libgpiod
     #[cfg(feature = "gpiod")]
-    fn init_gpiod(components: GpioComponents, max_steps: u32) -> Result<Self> {
+    fn init_gpiod(components: GpioComponents, max_steps: Option<u32>) -> Result<Self> {
         use gpiocdev::line::{Bias, Value};
         use gpiocdev::request::Request;
         use std::collections::HashMap;
@@ -179,7 +178,7 @@ impl GpioBoard {
         Ok(Self {
             exist: true,
             library: Some("gpiod".to_string()),
-            max_steps: Some(max_steps),
+            max_steps,
             z_touch_lines: Some(z_touch_pins),
             x_home_line,
             x_away_line,
@@ -193,7 +192,7 @@ impl GpioBoard {
     }
     
     #[cfg(not(feature = "gpiod"))]
-    fn init_gpiod(_components: GpioComponents, _max_steps: u32) -> Result<Self> {
+    fn init_gpiod(_components: GpioComponents, _max_steps: Option<u32>) -> Result<Self> {
         Err(anyhow!("GPIO support not compiled in. Enable 'gpiod' feature."))
     }
     
