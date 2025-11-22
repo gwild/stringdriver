@@ -1491,7 +1491,7 @@ impl eframe::App for OperationsGUI {
             
             // Operations dropdown menu
             ui.heading("Operations");
-            // Row 1: Select Operation and Repeat
+            // Row: Select Operation, Repeat, Execute, BREAK
             ui.horizontal(|ui| {
                 ui.label("Select Operation:");
                 egui::ComboBox::from_id_source("operation_select")
@@ -1515,10 +1515,7 @@ impl eframe::App for OperationsGUI {
                         self.repeat_pending = None;
                     }
                 }
-            });
-            
-            // Row 2: Execute and BREAK buttons
-            ui.horizontal(|ui| {
+                
                 // Execute button with green background - use Frame with fill
                 let execute_response = egui::Frame::default()
                     .fill(egui::Color32::from_rgb(0, 150, 0))
