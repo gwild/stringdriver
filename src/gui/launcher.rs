@@ -1,12 +1,19 @@
 /// Launcher for String Driver application
 /// 
-/// Builds release binaries if needed, then launches:
-/// - audio_monitor (audmon) via audmon.sh
-/// - Waits for shared memory to have results
-/// - stepper_gui
-/// - operations_gui
+/// Two modes:
+/// 1. Master GUI mode (default): Launches master_gui via master_gui.sh
+///    - master_gui embeds audmon, stepper_gui, and operations_gui
+///    - Single unified interface
 /// 
-/// Run with: cargo run --bin launcher --release
+/// 2. Separate mode (--separate flag): Launches components separately
+///    - audio_monitor (audmon) via audmon.sh
+///    - Waits for shared memory to have results
+///    - stepper_gui
+///    - operations_gui
+/// 
+/// Run with: 
+///   cargo run --bin launcher --release              # Master GUI mode
+///   cargo run --bin launcher --release -- --separate  # Separate mode
 
 use std::process::{Command, Stdio};
 use std::env;
@@ -16,10 +23,120 @@ use gethostname::gethostname;
 use serde_yaml;
 
 fn main() {
+    let args: Vec<String> = env::args().collect();
+    let separate_mode = args.iter().any(|a| a == "--separate");
+    
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("String Driver Launcher");
+    if separate_mode {
+        println!("Mode: Separate components");
+    } else {
+        println!("Mode: Master GUI (unified)");
+    }
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     
+    if separate_mode {
+        launch_separate_mode()
+    } else {
+        launch_master_gui_mode()
+    }
+}
+
+fn launch_master_gui_mode() {
+    // Get project root directory
+    let project_root = match env::var("CARGO_MANIFEST_DIR") {
+        Ok(dir) => std::path::PathBuf::from(dir),
+        Err(_) => {
+            eprintln!("ERROR: Could not determine project root");
+            std::process::exit(1);
+        }
+    };
+    
+    let release_dir = project_root.join("target/release");
+    
+    // Check if GPIO is enabled for this host from YAML
+    let gpio_enabled = check_gpio_enabled(&project_root);
+    println!("GPIO enabled for this host: {}", gpio_enabled);
+    
+    // Check if master_gui binary needs rebuilding
+    let master_gui_binary = release_dir.join("master_gui");
+    let needs_build = check_binary_needs_build(&project_root, &master_gui_binary);
+    
+    if needs_build {
+        println!("\nBuilding master_gui release binary...");
+        println!("  (Cargo build output will appear below)\n");
+        std::io::stdout().flush().ok();
+        
+        let mut build_args = vec!["build", "--release", "--bin", "master_gui"];
+        if gpio_enabled {
+            build_args.push("--features");
+            build_args.push("gpiod");
+        }
+        
+        let build_status = Command::new("cargo")
+            .args(&build_args)
+            .current_dir(&project_root)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status();
+        
+        match build_status {
+            Ok(status) if status.success() => {
+                println!("\n✓ master_gui release binary built successfully");
+            }
+            Ok(status) => {
+                eprintln!("\n✗ Build failed with exit code: {:?}", status.code());
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("\n✗ Failed to run cargo build: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        println!("\n✓ master_gui release binary is up-to-date");
+    }
+    
+    // Launch master_gui via master_gui.sh script (maintains persistence)
+    println!("\nLaunching master_gui via master_gui.sh...");
+    let master_gui_script = project_root.join("master_gui.sh");
+    if !master_gui_script.exists() {
+        eprintln!("✗ master_gui.sh not found at {}", master_gui_script.display());
+        std::process::exit(1);
+    }
+    
+    match Command::new("bash")
+        .arg(&master_gui_script)
+        .current_dir(&project_root)
+        .spawn() {
+        Ok(_) => {
+            println!("✓ master_gui launched via master_gui.sh");
+        }
+        Err(e) => {
+            eprintln!("✗ Failed to launch master_gui.sh: {}", e);
+            std::process::exit(1);
+        }
+    }
+    
+    // Wait for master_gui to be ready (check status file)
+    println!("\nWaiting for master_gui to initialize...");
+    let status_file = project_root.join(".master_gui_status");
+    let ready = wait_for_master_gui_ready(&status_file);
+    if !ready {
+        eprintln!("⚠ Warning: Timeout waiting for master_gui to be ready");
+        eprintln!("  master_gui may still be starting up");
+        eprintln!("  Status file: {}", status_file.display());
+    } else {
+        println!("✓ master_gui is ready");
+    }
+    
+    println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Master GUI launched!");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("\nLauncher exiting (master_gui will continue running)");
+}
+
+fn launch_separate_mode() {
     // Get project root directory
     let project_root = match env::var("CARGO_MANIFEST_DIR") {
         Ok(dir) => std::path::PathBuf::from(dir),
@@ -318,6 +435,32 @@ fn wait_for_shared_memory() -> bool {
     for attempt in 1..=MAX_ATTEMPTS {
         if check_shared_memory_has_data() {
             return true;
+        }
+        
+        if attempt < MAX_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+            if attempt % 10 == 0 {
+                print!(".");
+                std::io::stdout().flush().ok();
+            }
+        }
+    }
+    
+    false
+}
+
+/// Wait for master_gui status file to show "ready" (event-driven polling)
+/// Returns true if status is "ready", false if timeout
+fn wait_for_master_gui_ready(status_file: &std::path::Path) -> bool {
+    const MAX_ATTEMPTS: u32 = 60; // 60 attempts
+    const POLL_INTERVAL_MS: u64 = 500; // Check every 500ms
+    
+    for attempt in 1..=MAX_ATTEMPTS {
+        if let Ok(content) = std::fs::read_to_string(status_file) {
+            let status = content.trim();
+            if status == "ready" {
+                return true;
+            }
         }
         
         if attempt < MAX_ATTEMPTS {

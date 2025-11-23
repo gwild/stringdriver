@@ -103,6 +103,11 @@ impl MachineStateLogger {
         let mut client = Client::connect(&connection_str, NoTls)
             .context("Failed to connect to machine state database")?;
 
+        // Verify connection is actually working with a test query (no fallbacks - fail-fast if DB is unreachable)
+        client.query("SELECT 1", &[])
+            .context("Database connection test query failed - connection is not working")?;
+        eprintln!("✓ Machine state database connection verified (test query succeeded)");
+
         let insert_state_stmt = client
             .prepare("INSERT INTO machine_state (state_id, controls_id, host, recorded_at, stepper_positions, stepper_enabled, bump_check_enable, z_up_step, z_down_step, tune_rest, x_rest, z_rest, lap_rest, adjustment_level, retry_threshold, delta_threshold, z_variance_threshold, voice_count, amp_sum, voice_count_min, voice_count_max, amp_sum_min, amp_sum_max) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)")
             .context("Failed to prepare machine state SQL statement.")?;

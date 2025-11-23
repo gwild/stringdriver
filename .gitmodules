@@ -1,0 +1,3 @@
+[submodule "audmon"]
+	path = audmon
+	url = git@github.com:gwild/audmon.git

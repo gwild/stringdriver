@@ -67,7 +67,7 @@ impl CommandSet {
 }
 
 #[derive(Debug)]
-struct StepperGUI {
+pub struct StepperGUI {
     port: Option<Box<dyn serialport::SerialPort>>,
     positions: Vec<i32>,
     connected: bool,
@@ -169,7 +169,7 @@ impl StepperGUI {
         stream.flush()
     }
 
-    fn new(port_path: String, num_steppers: usize, string_num: usize, x_step_index: Option<usize>, z_first_index: Option<usize>, tuner_first_index: Option<usize>, tuner_port_path: Option<String>, tuner_num_steppers: Option<usize>, debug: bool, debug_file: Option<File>, z_up_step: i32, z_down_step: i32, firmware: ArduinoFirmware, x_max_pos: Option<i32>, x_step: i32) -> Self {
+    pub fn new(port_path: String, num_steppers: usize, string_num: usize, x_step_index: Option<usize>, z_first_index: Option<usize>, tuner_first_index: Option<usize>, tuner_port_path: Option<String>, tuner_num_steppers: Option<usize>, debug: bool, debug_file: Option<File>, z_up_step: i32, z_down_step: i32, firmware: ArduinoFirmware, x_max_pos: Option<i32>, x_step: i32) -> Self {
         let mut s = Self::default();
         s.port_path = port_path;
         s.positions = vec![0; num_steppers];
@@ -458,7 +458,7 @@ impl StepperGUI {
         }
     }
 
-    fn connect(&mut self) {
+    pub fn connect(&mut self) {
         let port_path = self.port_path.clone();
         self.kill_port_users(&port_path);
         self.log(&format!("Connecting to Arduino on {} @115200", port_path));
@@ -710,7 +710,7 @@ impl StepperGUI {
         self.send_cmd_bin(self.command_set.set_max_id, axis_idx, max_val);
     }
 
-    fn connect_tuner(&mut self) {
+    pub fn connect_tuner(&mut self) {
         if let Some(ref tuner_port_path) = self.tuner_port_path {
             let port_path = tuner_port_path.clone();
             self.kill_port_users(&port_path);
@@ -997,16 +997,16 @@ impl StepperGUI {
     }
 }
 
-impl eframe::App for StepperGUI {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if !self.connected {
-                ui.label("Connecting to Arduino...");
-                return;
-            }
-            
-            // Refresh positions periodically (every 500ms)
-            ctx.request_repaint_after(Duration::from_millis(500));
+impl StepperGUI {
+    /// Render the UI content (can be called from panels or standalone)
+    pub fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if !self.connected {
+            ui.label("Connecting to Arduino...");
+            return;
+        }
+        
+        // Refresh positions periodically (every 500ms)
+        ctx.request_repaint_after(Duration::from_millis(500));
 
 
             // Channel colors matching plot.rs color scheme
@@ -1555,6 +1555,13 @@ impl eframe::App for StepperGUI {
             });
 
             ctx.request_repaint_after(Duration::from_millis(500));
+    }
+}
+
+impl eframe::App for StepperGUI {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.render_ui(ui, ctx);
         });
     }
 }

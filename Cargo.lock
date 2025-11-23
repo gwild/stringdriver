@@ -583,6 +583,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "audio_monitor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "chrono",
+ "clap",
+ "crossbeam-channel",
+ "crossbeam-queue",
+ "ctrlc",
+ "dotenvy",
+ "eframe",
+ "egui",
+ "egui_plot",
+ "env_logger",
+ "fern",
+ "gethostname 0.2.3",
+ "hound",
+ "libc",
+ "log",
+ "memchr",
+ "memmap2",
+ "nalgebra",
+ "ndarray 0.15.6",
+ "nom",
+ "num-traits",
+ "pitch-detector",
+ "portaudio",
+ "postgres",
+ "rayon",
+ "realfft",
+ "rfd",
+ "ringbuf",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "serialport",
+ "shared_memory",
+ "signal-hook",
+ "tokio",
+ "uuid",
+ "winapi",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3952,6 +3998,7 @@ name = "stringdriver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "audio_monitor",
  "bincode",
  "chrono",
  "clap",

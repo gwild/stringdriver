@@ -1833,6 +1833,32 @@ impl Operations {
         Ok(messages.join("\n"))
     }
     
+    /// Helper function to fetch x_step from stepper_gui socket
+    fn fetch_x_step_from_socket(socket_path: &str) -> Result<i32> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+
+        let mut stream = UnixStream::connect(socket_path)
+            .map_err(|e| anyhow::anyhow!("Failed to connect to stepper_gui socket at {}: {}", socket_path, e))?;
+        stream
+            .write_all(b"get_x_step\n")
+            .map_err(|e| anyhow::anyhow!("Failed to request x_step: {}", e))?;
+        stream
+            .flush()
+            .map_err(|e| anyhow::anyhow!("Failed to flush x_step request: {}", e))?;
+
+        let mut reader = BufReader::new(stream);
+        let mut response = String::new();
+        let bytes = reader
+            .read_line(&mut response)
+            .map_err(|e| anyhow::anyhow!("Failed to read x_step response: {}", e))?;
+        if bytes == 0 {
+            return Err(anyhow::anyhow!("Stepper GUI closed socket without replying"));
+        }
+        response.trim().parse::<i32>()
+            .map_err(|e| anyhow::anyhow!("Failed to parse x_step response '{}': {}", response.trim(), e))
+    }
+
     /// X Home operation: moves X stepper toward home until home limit is hit
     /// Handles both separate home/away pins and single X_LIMIT_PIN (direction-based)
     pub fn x_home<T: StepperOperations>(
@@ -1840,6 +1866,7 @@ impl Operations {
         stepper_ops: &mut T,
         positions: &mut [i32],
         exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
+        socket_path: Option<&str>,
     ) -> Result<String> {
         let x_step_index = self.x_step_index.ok_or_else(|| anyhow!("X stepper not configured"))?;
         
@@ -1900,6 +1927,13 @@ impl Operations {
                 break;
             }
             
+            // Sync x_step from stepper_gui before move (may have changed during execution)
+            if let Some(socket) = socket_path {
+                if let Ok(x_step) = Self::fetch_x_step_from_socket(socket) {
+                    self.set_x_step(x_step);
+                }
+            }
+            
             // Move -10 steps toward home
             self.rel_move_x(stepper_ops, x_step_index, STEP_SIZE)?;
             // Position is updated by refresh_positions() in stepper_ops.rel_move(), don't manually update
@@ -1941,6 +1975,7 @@ impl Operations {
         stepper_ops: &mut T,
         positions: &mut [i32],
         exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
+        socket_path: Option<&str>,
     ) -> Result<String> {
         let x_step_index = self.x_step_index.ok_or_else(|| anyhow!("X stepper not configured"))?;
         
@@ -2004,6 +2039,13 @@ impl Operations {
                 break;
             }
             
+            // Sync x_step from stepper_gui before move (may have changed during execution)
+            if let Some(socket) = socket_path {
+                if let Ok(x_step) = Self::fetch_x_step_from_socket(socket) {
+                    self.set_x_step(x_step);
+                }
+            }
+            
             // Move +10 steps toward away
             self.rel_move_x(stepper_ops, x_step_index, STEP_SIZE)?;
             // Position is updated by refresh_positions() in stepper_ops.rel_move(), don't manually update
@@ -2047,6 +2089,7 @@ impl Operations {
         stepper_ops: &mut T,
         positions: &mut [i32],
         exit_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
+        socket_path: Option<&str>,
     ) -> Result<String> {
         let x_step_index = self.x_step_index.ok_or_else(|| anyhow!("X stepper not configured"))?;
         
@@ -2083,11 +2126,11 @@ impl Operations {
         // Step 3: Move to the closer limit
         if use_home {
             messages.push("Step 3: Moving to home position...".to_string());
-            let home_msg = self.x_home(stepper_ops, positions, exit_flag)?;
+            let home_msg = self.x_home(stepper_ops, positions, exit_flag, socket_path)?;
             messages.push(home_msg);
         } else {
             messages.push("Step 3: Moving to away position...".to_string());
-            let away_msg = self.x_away(stepper_ops, positions, exit_flag)?;
+            let away_msg = self.x_away(stepper_ops, positions, exit_flag, socket_path)?;
             messages.push(away_msg);
         }
         

@@ -24,6 +24,7 @@ use std::os::unix::net::UnixStream;
 use std::process::Command;
 use uuid::Uuid;
 use chrono::Utc;
+use log::warn;
 
 /// Type alias for partials slot (matches partials_slot::PartialsSlot pattern)
 /// Using get_results::PartialsData type
@@ -231,10 +232,10 @@ impl operations::StepperOperations for ArduinoStepperOps {
 }
 
 /// Operations GUI state
-struct OperationsGUI {
-    operations: Arc<RwLock<operations::Operations>>,
+pub struct OperationsGUI {
+    pub operations: Arc<RwLock<operations::Operations>>,
     message: String,
-    partials_slot: PartialsSlot,
+    pub partials_slot: PartialsSlot,
     partials_per_channel: Arc<AtomicUsize>,
     voice_count_cap_cache: i32,
     selected_operation: String,
@@ -249,9 +250,9 @@ struct OperationsGUI {
     // Track stepper positions locally (updated as we move steppers)
     stepper_positions: Arc<Mutex<std::collections::HashMap<usize, i32>>>,
     // Exit flag to signal operations to stop
-    exit_flag: Arc<AtomicBool>,
+    pub exit_flag: Arc<AtomicBool>,
     // Operation lock to prevent concurrent execution
-    operation_running: Arc<AtomicBool>,
+    pub operation_running: Arc<AtomicBool>,
     operation_task: Option<OperationTask>,
     repeat_enabled: bool,
     repeat_pending: Option<(String, Instant)>,
@@ -273,7 +274,7 @@ struct OperationResult {
 
 impl OperationsGUI {
     /// Create a new OperationsGUI instance
-    fn new() -> Result<Self> {
+    pub fn new() -> Result<Self> {
         // Create a partials slot for shared memory updates
         let partials_slot: PartialsSlot = Arc::new(Mutex::new(None));
         let partials_per_channel = Arc::new(AtomicUsize::new(12));
@@ -358,47 +359,21 @@ impl OperationsGUI {
             derive_stepper_roles(&ops_guard, total_steppers)
         });
 
-        // Periodically sync stepper positions from stepper_gui (1 Hz) so logger sees live data
-        if let Some(arduino_ops_ref) = arduino_ops.as_ref() {
-            if let Ok(ops_guard) = arduino_ops_ref.lock() {
-                let socket_path_for_poll = ops_guard.socket_path();
-                let stepper_positions_for_poll = Arc::clone(&stepper_positions);
-                thread::spawn(move || {
-                    loop {
-                        thread::sleep(Duration::from_secs(1));
-                        if !std::path::Path::new(&socket_path_for_poll).exists() {
-                            continue;
-                        }
-                        match ArduinoStepperOps::fetch_positions_from_socket(&socket_path_for_poll) {
-                            Ok(values) => {
-                                if let Ok(mut map) = stepper_positions_for_poll.lock() {
-                                    for (idx, pos) in values.iter().enumerate() {
-                                        map.insert(idx, *pos);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("Stepper position poll failed: {}", e);
-                            }
-                        }
-                    }
-                });
-            } else {
-                eprintln!("WARNING: Failed to acquire Arduino ops lock for position polling");
-            }
-        }
-
-        // Initialize machine state logging (non-blocking, can fail silently)
-        let logger = config_loader::DbSettings::from_env()
-            .ok()
-            .and_then(|db_config| {
-                Some(machine_state_logger::MachineStateLoggingContext::new_nonblocking(db_config))
-            });
+        // Initialize machine state logging (non-blocking, optional functionality)
+        // If database configuration is missing, logging is disabled (not a fallback - logging is optional)
+        let logger: Option<machine_state_logger::MachineStateLoggingContext> = 
+            match crate::config_loader::DbSettings::from_env() {
+                Ok(db_config) => Some(machine_state_logger::MachineStateLoggingContext::new_nonblocking(db_config)),
+                Err(e) => {
+                    warn!(target: "operations_gui", "Machine state logging unavailable: {}. Set DB_PASSWORD or PG_PASSWORD environment variable.", e);
+                    None
+                }
+            };
         let mut voice_count_min_logger_arc: Option<Arc<Mutex<Vec<i32>>>> = None;
         let mut voice_count_max_logger_arc: Option<Arc<Mutex<Vec<i32>>>> = None;
         
         // Start 1Hz logging thread if logger available
-        // Uses existing position arrays - does NOT query Arduino (non-blocking)
+        // Fetches positions directly from stepper_gui (no separate polling thread needed)
         if let Some(ref logger_ref) = logger {
             let logger_clone = logger_ref.clone();
             let operations_clone = Arc::clone(&operations);
@@ -412,6 +387,16 @@ impl OperationsGUI {
             let hostname_clone = hostname.clone();
             let total_steppers = ard_settings.num_steppers.unwrap_or(0);
             let stepper_roles_clone_for_logger = Arc::clone(&stepper_roles_metadata);
+            // Get socket_path for direct position fetching in logger thread
+            let socket_path_for_logger = if let Some(arduino_ops_ref) = arduino_ops.as_ref() {
+                if let Ok(ops_guard) = arduino_ops_ref.lock() {
+                    Some(ops_guard.socket_path())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             thread::spawn(move || {
                 use std::time::Instant;
                 let mut last_log = Instant::now();
@@ -420,22 +405,48 @@ impl OperationsGUI {
                     thread::sleep(Duration::from_millis(100));
                     if Instant::now().duration_since(last_log) >= LOG_INTERVAL {
                         if logger_clone.is_enabled() {
-                            // Capture machine state from existing arrays (non-blocking, no Arduino query)
-                    if let (Ok(ops), Ok(positions_map), Ok(vc_min), Ok(vc_max), Ok(amp_min), Ok(amp_max)) = 
-                        (operations_clone.read(), stepper_positions_clone.lock(), 
+                            // Fetch positions directly from stepper_gui (1Hz is slow enough that socket I/O overhead is negligible)
+                            let mut all_positions = vec![0i32; total_steppers];
+                            let mut all_enabled = vec![false; total_steppers];
+                            
+                            // Fetch fresh positions directly from socket
+                            if let Some(ref socket_path) = socket_path_for_logger {
+                                if std::path::Path::new(socket_path).exists() {
+                                    if let Ok(fresh_positions) = ArduinoStepperOps::fetch_positions_from_socket(socket_path) {
+                                        // Update positions array and also update cached map
+                                        for (idx, &pos) in fresh_positions.iter().enumerate() {
+                                            if idx < all_positions.len() {
+                                                all_positions[idx] = pos;
+                                            }
+                                        }
+                                        // Update cached map for other uses
+                                        if let Ok(mut map) = stepper_positions_clone.lock() {
+                                            for (idx, &pos) in fresh_positions.iter().enumerate() {
+                                                map.insert(idx, pos);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Fallback to cached positions if socket fetch failed
+                            if let Ok(positions_map) = stepper_positions_clone.lock() {
+                                for (idx, &pos) in positions_map.iter() {
+                                    if *idx < all_positions.len() && all_positions[*idx] == 0 {
+                                        all_positions[*idx] = pos;
+                                    }
+                                }
+                            }
+                            
+                            // Get enabled states and other data
+                    if let (Ok(ops), Ok(vc_min), Ok(vc_max), Ok(amp_min), Ok(amp_max)) = 
+                        (operations_clone.read(), 
                                  voice_count_min_clone.lock(), voice_count_max_clone.lock(),
                                  amp_sum_min_clone.lock(), amp_sum_max_clone.lock()) {
                                 
-                                // Build complete position array from existing HashMap
-                                let mut all_positions = vec![0i32; total_steppers];
-                                let mut all_enabled = vec![false; total_steppers];
-                                
-                                // Fill from positions map (uses existing tracked positions)
-                                for (idx, &pos) in positions_map.iter() {
-                                    if *idx < all_positions.len() {
-                                        all_positions[*idx] = pos;
-                                        all_enabled[*idx] = ops.get_stepper_enabled(*idx);
-                                    }
+                                // Fill enabled states
+                                for idx in 0..all_enabled.len() {
+                                    all_enabled[idx] = ops.get_stepper_enabled(idx);
                                 }
                                 
                                 // Get all settings from Operations struct
@@ -544,7 +555,7 @@ impl OperationsGUI {
         }
     }
     
-    fn reconcile_voice_count_cap(&mut self) {
+    pub fn reconcile_voice_count_cap(&mut self) {
         let detected = self.partials_per_channel.load(std::sync::atomic::Ordering::Relaxed) as i32;
         if detected <= 0 {
             return;
@@ -556,7 +567,7 @@ impl OperationsGUI {
         }
     }
     
-    fn poll_operation_result(&mut self) {
+    pub fn poll_operation_result(&mut self) {
         let mut should_clear = false;
         let mut schedule_repeat_op: Option<String> = None;
         if let Some(task) = self.operation_task.as_mut() {
@@ -871,16 +882,19 @@ impl OperationsGUI {
                         &mut *stepper_client,
                         &mut local_positions,
                         Some(&exit_flag),
+                        Some(&socket_path),
                     ),
                     "x_away" => ops_guard.x_away(
                         &mut *stepper_client,
                         &mut local_positions,
                         Some(&exit_flag),
+                        Some(&socket_path),
                     ),
                     "x_calibrate" => ops_guard.x_calibrate(
                         &mut *stepper_client,
                         &mut local_positions,
                         Some(&exit_flag),
+                        Some(&socket_path),
                     ),
                     _ => Err(anyhow::anyhow!("Unsupported operation")),
                 }
@@ -1003,31 +1017,10 @@ impl OperationsGUI {
     }
 }
 
-impl eframe::App for OperationsGUI {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // Check exit flag and close window if set (but only if no operation is running)
-        // This ensures BREAK button only stops operations, not the GUI
-        // EXIT button (kill_all) sets exit_flag when no operation is running, so GUI closes
-        if self.exit_flag.load(std::sync::atomic::Ordering::Relaxed) 
-            && !self.operation_running.load(std::sync::atomic::Ordering::Relaxed) {
-            // Request close via viewport command
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
-        }
-        
-        // Request continuous repaints for smooth meter updates
-        ctx.request_repaint_after(Duration::from_millis(16)); // ~60 Hz update rate
-        
-        // Poll for any finished background operations before rendering
-        self.poll_operation_result();
-        
-        // Update audio analysis from partials slot using get_results module
-        let partials = get_results::read_partials_from_slot(&self.partials_slot);
-        self.operations.read().unwrap().update_audio_analysis_with_partials(partials);
-        self.reconcile_voice_count_cap();
-        
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Operations Control");
+impl OperationsGUI {
+    /// Render the UI content (can be called from panels or standalone)
+    pub fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Operations Control");
             
             // Machine state logging + exit controls
             ui.horizontal(|ui| {
@@ -1637,6 +1630,34 @@ impl eframe::App for OperationsGUI {
                         );
                     });
             });
+    }
+}
+
+impl eframe::App for OperationsGUI {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Check exit flag and close window if set (but only if no operation is running)
+        // This ensures BREAK button only stops operations, not the GUI
+        // EXIT button (kill_all) sets exit_flag when no operation is running, so GUI closes
+        if self.exit_flag.load(std::sync::atomic::Ordering::Relaxed) 
+            && !self.operation_running.load(std::sync::atomic::Ordering::Relaxed) {
+            // Request close via viewport command
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        
+        // Request continuous repaints for smooth meter updates
+        ctx.request_repaint_after(Duration::from_millis(16)); // ~60 Hz update rate
+        
+        // Poll for any finished background operations before rendering
+        self.poll_operation_result();
+        
+        // Update audio analysis from partials slot using get_results module
+        let partials = get_results::read_partials_from_slot(&self.partials_slot);
+        self.operations.read().unwrap().update_audio_analysis_with_partials(partials);
+        self.reconcile_voice_count_cap();
+        
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.render_ui(ui, ctx);
         });
     }
 }
